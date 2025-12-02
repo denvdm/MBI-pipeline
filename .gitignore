@@ -1,0 +1,61 @@
+```gitignore
+# R history and session data
+.Rhistory
+.Rapp.history
+.RData
+.RDataTmp
+.Ruserdata
+
+# RStudio user folders
+.Rproj.user/
+
+# R project files
+*.Rproj
+.Rproj.user/
+
+# R build/check output
+.Rcheck/
+
+# Renviron / Rprofile
+.Renviron
+.Rprofile
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE/editor noise
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary or cache files
+*.tmp
+*.temp
+*.bak
+*.old
+*.log
+*.out
+*.aux
+.cache/
+.Rtemp/
+.Rtmp/
+tmp/
+temp/
+
+# Data not committed by default
+data/
+data-raw/
+*.rds
+*.Rds
+*.RData
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Generated documentation
+docs/
+site/
