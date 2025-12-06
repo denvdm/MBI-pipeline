@@ -28,7 +28,7 @@ This isolates PET-weighted deviation **not explained by global deviation**, maki
 
 ---
 
-## Conceptual diagram (Mermaid)
+## Conceptual diagram
 
 ```mermaid
 graph LR
