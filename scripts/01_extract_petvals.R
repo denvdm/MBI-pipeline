@@ -34,4 +34,5 @@ fdg_raw$fdg_w <- fdg_raw$fdg_z - min(fdg_raw$fdg_z, na.rm = TRUE) + 1e-6
 fdg_raw$fdg_w <- fdg_raw$fdg_w / mean(fdg_raw$fdg_w, na.rm = TRUE)
 fdg <- fdg_raw %>% dplyr::transmute(region, weight = fdg_w)
 
-write.table(fdg,file=paste0(path,"pet_fdg_featMedians.txt"),sep = "\t",qu
+write.table(fdg,file=paste0(path,"pet_fdg_featMedians.txt"),sep = "\t",quote=FALSE,row.names=FALSE)
+
