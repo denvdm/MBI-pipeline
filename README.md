@@ -28,16 +28,16 @@ This isolates PET-weighted deviation **not explained by global deviation**, maki
 
 ---
 
-## Conceptual diagram
+## Conceptual diagram (Mermaid)
 
 ```mermaid
-graph LR
-    A["Regional deviations"] --> B["GBI"]
-    A --> C["PET weights"]
-    C --> D["MBI_raw"]
-    B --> E["Residualization"]
+flowchart LR
+    A[Regional<br/>Deviations] --> B[GBI<br/>(unweighted mean)]
+    A --> C[PET Weights]
+    C --> D[MBI_raw<br/>(weighted sum)]
+    B --> E[Residualization<br/>MBI_raw ~ GBI]
     D --> E
-    E --> F["MBI"]
+    E --> F[MBI<br/>(alignment metric)]
 ```
 
 ---
