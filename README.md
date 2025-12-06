@@ -30,8 +30,7 @@ This isolates PET-weighted deviation **not explained by global deviation**, maki
 
 ## Conceptual diagram (Mermaid)
 
-```
-mermaid
+```mermaid
 flowchart LR
     A[Regional<br/>Deviations] --> B[GBI<br/>(unweighted mean)]
     A --> C[PET Weights]
