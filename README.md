@@ -1,5 +1,5 @@
 # MBI-pipeline
-A modular R-based pipeline for computing Metabolic Brain Index (MBI) metrics by integrating MRI-based normative deviations with PET-derived metabolic priors.
+A modular R-based pipeline for computing **Metabolic Brain Index (MBI)** metrics by integrating MRI-based normative deviations with PET-derived metabolic priors.
 
 This repository is designed to be:
 - Self-contained: each stage is runnable end-to-end from the command line.
@@ -16,7 +16,7 @@ Unweighted whole-brain deviation score (mean deviation across regions).
 ### **2. MBI_raw — PET-weighted deviation index**
 Weighted deviation score using region-specific PET metabolic weights.
 
-### **3. MBI — alignment metric (formerly MDA)**
+### **3. MBI — alignment metric**
 Residual of the model:
 
     MBI_raw ~ GBI
@@ -39,27 +39,6 @@ graph LR
 
 ---
 
-## Repository layout
-
-### scripts/
-  Pipeline entrypoints. Each script is intended to run non-interactively from the command line.
-
-### helpers/
-  Reusable functions sourced by scripts (I/O, QC, modelling, aggregation).
-
-### jobs/
-  HPC or cluster job templates and wrappers.
-
-### extras/
-  Optional utilities, exploratory scripts, and QC helpers not required for the core pipeline.
-
-### examples/toy/
-  Fully self-contained toy example with synthetic data and runnable scripts.
-
-### config_generic.yaml
-  Example configuration file defining paths and parameters.
-
----
 
 ## Quick run example
 
@@ -73,94 +52,181 @@ Expected outputs include computed indices and basic QC summaries written to the 
 
 ---
 
-## Installation
+## Conceptual workflow
 
-R requirements:
-- R version 4.2 or newer
+1. **PET feature extraction**  
+   Parcellate PET maps and derive region-wise metabolic weights.
 
-Dependency management:
-Using renv is strongly recommended for reproducibility.
+2. **Normative modelling (MRI)**  
+   Estimate region-wise deviations (e.g. z-scores) from a normative model with covariates.
 
-In R:
-install.packages("renv")
-renv::restore()
+3. **Index computation**  
+   Aggregate deviations into GBI, MBI_raw, and MBI.
 
-If renv is not used, install required packages manually when prompted by the scripts.
+4. **PET–MBI alignment QC (optional)**  
+   Evaluate how PET weights relate to MRI deviations and derived indices.
 
+---
 
-## Running the pipeline
+## Repository structure
 
-Recommended workflow:
+scripts/  
+  Command-line entrypoints for each pipeline stage.
 
-1. Copy the generic configuration file:
-cp config_generic.yaml config.yaml
+helpers/  
+  Reusable functions sourced by scripts (normative modelling, PET extraction, aggregation, QC).
 
-2. Edit config.yaml to point to your data and desired output directory.
+extras/  
+  Optional utilities and calibration tools (not required for the core pipeline).
 
-3. Run individual pipeline stages:
-Rscript scripts/STAGE_NAME.R --config config.yaml
+jobs/  
+  Example Slurm batch scripts for running the pipeline on HPC systems.
 
-A full launcher can be used:
-bash scripts/run_all.sh --config config.yaml
+config_generic.yaml  
+  Example configuration file defining inputs, outputs, and modelling parameters.
 
+DESCRIPTION  
+  Package-style metadata (dependencies, authorship, license).
 
-Typical pipeline stages (high-level)
+---
 
-- PET mapping or preparation (optional)
-  Registers or prepares PET priors for downstream use.
+## Pipeline stages
 
-- PET weight extraction
-  Produces a region-level table of metabolic weights.
+### Stage 01 — Extract PET values
+**Script:** `scripts/01_extract_petvals.R`  
+**Helpers:** `helpers/pet_parcel_extract.R`
 
-- Normative modelling
-  Computes region-wise deviations with appropriate covariates and QC.
+Parcellates PET maps and computes region-wise PET summaries (e.g. median FDG uptake).
 
-- Index computation
-  Aggregates deviations into GBI, MBI_raw, and MBI.
+**Key output (example):**
+```
+out/extract_pet/pet_fdg_featMedians.txt
+```
 
-- Downstream analysis (optional)
-  Associations, plots, and summary tables.
+---
 
+### Stage 02 — Run normative modelling
+**Script:** `scripts/02_run_normdevs.R`  
+**Helpers:** `helpers/normative_modeling.R`
+
+Fits region-wise normative models and outputs deviation scores with QC summaries.
+
+**Key outputs (example):**
+```
+out/normdev/deviations_z_long.txt
+out/normdev/qc_normdev.tsv
+```
+
+---
+
+### Stage 03 — Compute MBI indices
+**Script:** `scripts/03_run_mbi.R`  
+**Helpers:** `helpers/compute_mbi.R`
+
+Aggregates regional deviations into subject-level indices.
+
+**Key output (example):**
+```
+out/compute_mbi/mbi_flagship_scores.txt
+```
+Columns typically include:
+```
+id | gbi | mbi_raw | mbi
+```
+
+---
+
+### Stage 04 — Relate MBI to PET (QC / diagnostics)
+**Script:** `scripts/04_relate_mbi_pet.R`  
+**Helpers:** `helpers/relate_pet_funcs.R`
+
+Evaluates alignment between PET weights and MRI deviations / MBI metrics.
+
+**Key outputs (example):**
+```
+out/qc_pet_align/
+```
+
+---
+
+### Optional: run entire pipeline
+**Script:** `scripts/run_all.sh`
+
+Sequentially runs stages 01–04 (and optional PET preparation) using a single config file.
+
+---
 
 ## Configuration
 
-All cohort-specific paths and parameters should be defined in the YAML configuration file.
+All cohort-specific settings live in a YAML configuration file.
 
-Typical configuration entries include:
-- Input paths for deviations or raw imaging data
-- PET priors or PET weight tables
-- Parcellation or region lookup tables
-- Output directory
-- Modelling parameters (covariates, winsorization thresholds, transforms)
-- Compute options (threads, overwrite flags, QC toggles)
+Start by copying:
+```
+cp config_generic.yaml config.yaml
+```
 
-See config_generic.yaml for example keys and expected structure.
+The configuration defines:
+- Input feature tables (MRI features, PET maps)
+- Parcellation and feature mappings
+- Covariates for normative modelling
+- Output directory structure
+- Winsorization and weighting options
+- Compute / overwrite flags
 
+The pipeline is intentionally strict about configuration to avoid hidden assumptions.
 
-## Inputs and outputs
+---
 
-Inputs:
-- Subject by region deviation matrix or inputs required to compute deviations
-- Region-level PET weight table
-- Consistent region identifiers across inputs
+## Running the pipeline
 
-Outputs:
-- Per-subject indices table containing GBI, MBI_raw, and MBI
-- QC summaries (missingness, coverage, distributions)
-- Log files including session information
+Example (single stage):
+```
+Rscript scripts/02_run_normdevs.R --config config.yaml
+```
 
+Run everything:
+```
+bash scripts/run_all.sh --config config.yaml
+```
+
+All scripts are intended to run non-interactively.
+
+---
+
+## Inputs and outputs (contracts)
+
+**Inputs (typical):**
+- Subject × region MRI feature table
+- Region lookup / feature map
+- PET map(s) or precomputed PET region weights
+- Covariate table (age, sex, scanner variables, etc.)
+
+**Outputs:**
+- Subject-level MBI metrics (GBI, MBI_raw, MBI)
+- QC tables and summaries
+- Log files and session information
+
+---
 
 ## Reproducibility
 
-Recommended practices:
-- Use renv.lock to pin R package versions
-- Save sessionInfo() for each run
-- Avoid hard-coded paths in scripts
+- All scripts report session information.
+- Configuration files fully specify analysis parameters.
+- The repo includes LICENSE, CITATION.cff, and a toy example for validation.
 
+---
 
-## Citing
+## License and citation
 
-If you use this pipeline in academic work, please cite via the CITATION.cff file.
+MIT License.  
+If you use this pipeline in academic work, please cite via the included `CITATION.cff`.
+
+---
+
+## Notes
+
+This repository prioritizes **clarity and methodological transparency** over maximal automation.
+Users are encouraged to inspect intermediate outputs and adapt stages as needed.
 
 
 ## Contributing
@@ -172,6 +238,4 @@ Please include:
 - Relevant log output
 
 
-## License
 
-MIT License. See LICENSE for details.
