@@ -1,38 +1,62 @@
-# Extract regional PET values from templates or maps using a specified parcellation.
-# Applies winsorization, coverage checks, and generates PET-derived weighting vectors.
+#!/usr/bin/env Rscript
+suppressPackageStartupMessages({
+  library(RNifti)
+  library(dplyr)
+})
 
-###### load packages, set paths and load functions
-library(RNifti)
-path <- "/path/to/data"
+source("helpers/run_helpers.R")
 
-### note: run 00_prep_petmap.sh first
-source("R/pet_parcel_extract.R")
+opt <- parse_common_args()
 
-# inputs already in PET space (3mm); atlas NN-resampled, GM prob optional
-pet_file   <- "source-castrillon2023_desc-cmrglc_space-MNI152_res-3mm_feature.nii.gz"
-atlas_file <- "aparc+aseg_inPETspace_3mm.nii.gz"  # nearest-neighbour to PET grid
-gm_file    <- "GMprob_inPETspace_3mm.nii.gz"          # liberal GM (e.g., p>=0.20)
-lut <- read.csv("lut_aparc_aseg.csv")
+cfg <- read_config(opt$config)
+
+# Paths
+maps_dir <- cfg$paths$maps_dir %||% NULL
+if (is.null(maps_dir)) stop("Missing config: paths: maps_dir", call. = FALSE)
+
+pet_file   <- cfg$inputs$pet_file   %||% file.path(maps_dir, "source-castrillon2023_desc-cmrglc_space-MNI152_res-3mm_feature.nii.gz")
+atlas_file <- cfg$inputs$atlas_file %||% file.path(maps_dir, "aparc+aseg_inPETspace_3mm.nii.gz")
+gm_file    <- cfg$inputs$gm_file    %||% file.path(maps_dir, "GMprob_inPETspace_3mm.nii.gz")
+lut_file   <- cfg$inputs$lut_file   %||% file.path(maps_dir, "lut_aparc_aseg.csv")
+
+assert_file_exists(pet_file, "pet_file")
+assert_file_exists(atlas_file, "atlas_file")
+assert_file_exists(gm_file, "gm_file")
+assert_file_exists(lut_file, "lut_file")
+
+source_local("pet_parcel_extract.R")
+
+out_stage <- stage_dir(opt$outdir, "extract_pet")
+out_parc  <- file.path(out_stage, "pet_fdg_parcellated.csv")
+out_wts   <- file.path(out_stage, "pet_fdg_featMedians.txt")
+
+if (file.exists(out_wts) && !opt$overwrite) {
+  stop("Output exists: ", out_wts, " (use --overwrite)", call. = FALSE)
+}
+
+lut <- read.csv(lut_file)
 
 res <- save_pet_parcel_csv(
-  pet=pet_file, atlas=atlas_file, gm_prob=gm_file, output_csv="pet_fdg_parcellated.csv",
-  gm_thr=0.20, use_median=TRUE, clamp_neg=TRUE, winsor_q=NULL,  # set winsor_q=0.005 if needed
-  min_vox=50L, min_cov=0.30, lut=lut
+  pet = pet_file, atlas = atlas_file, gm_prob = gm_file,
+  output_csv = out_parc,
+  gm_thr = 0.20, use_median = TRUE, clamp_neg = TRUE, winsor_q = NULL,
+  min_vox = 50L, min_cov = 0.30, lut = lut
 )
 
-### do some formatting to make suitable as input for NMI code
-fdg_raw <- res$parcels
-# align region naming
+fdg_raw <- res$parcels |>
+  dplyr::rename(index = label, fdg_median = pet_value, fdg_mean = pet_mean,
+                nvox_used = n_used, nvox_total = n_total, region = ROI_Name)
+
 colnames(fdg_raw) <- c("index","fdg_median","fdg_mean","p05","p95","nvox_used","nvox_total","coverage","region")
 fdg_raw$region <- gsub("^ctx-","",fdg_raw$region)
 fdg_raw$region <- gsub("-","_",fdg_raw$region)
 fdg_raw$region <- make.names(fdg_raw$region, unique = TRUE)
 
-# z-scale FDG values, move to min 0, normalize to 1 and set column names
 fdg_raw$fdg_z <- scale(fdg_raw$fdg_median)
 fdg_raw$fdg_w <- fdg_raw$fdg_z - min(fdg_raw$fdg_z, na.rm = TRUE) + 1e-6
 fdg_raw$fdg_w <- fdg_raw$fdg_w / mean(fdg_raw$fdg_w, na.rm = TRUE)
-fdg <- fdg_raw %>% dplyr::transmute(region, weight = fdg_w)
 
-write.table(fdg,file=paste0(path,"pet_fdg_featMedians.txt"),sep = "\t",quote=FALSE,row.names=FALSE)
+fdg <- fdg_raw |> dplyr::transmute(region, weight = fdg_w)
 
+write.table(fdg, file = out_wts, sep = "\t", quote = FALSE, row.names = FALSE)
+cat("Wrote:\n- ", out_parc, "\n- ", out_wts, "\n")

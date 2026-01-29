@@ -1,132 +1,225 @@
-# Fit normative models for all structural MRI features and compute subject-level deviations.
-# Uses GAM-based modelling with covariates, site effects, and standardized residual outputs.
-# NOTE: This section uses UKB-specific directories; generalization planned.
+#!/usr/bin/env Rscript
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(data.table)
+  library(future.apply)
+  library(tidyr)
+})
 
-###### load packages and set paths
-library(dplyr,data.table,mgcv,future.apply,matrixStats)
+source("helpers/run_helpers.R")
+opt <- parse_common_args()
+cfg <- read_config(opt$config)
 
-path <- "/path/to/data"
+source_local("normative_modeling.R")
 
-# NOTE: The following section uses UK Biobank directory structure.
-# Adjust to match your dataset layout.
+# -----------------------------
+# generic feature table + feature map
+# -----------------------------
+features_file    <- cfg$inputs$features_file    %||% NULL
+feature_map_file <- cfg$inputs$feature_map_file %||% NULL
 
-## load functions ()
-source("R/normative_modeling.R")
+if (is.null(features_file))    stop("Missing config: inputs: features_file", call. = FALSE)
+if (is.null(feature_map_file)) stop("Missing config: inputs: feature_map_file", call. = FALSE)
 
-# Modeling options
-k_age          <- 10         # basis dimension for s(age); mgcv will penalize
-use_site_RE    <- TRUE       # include site as random effect
-sex_interact   <- FALSE      # if TRUE adds s(age, by=sex) interaction smooth
-family_gaussian <- gaussian()# keep gaussian; deviations are standardized residuals
-n_cores <- max(1L, parallel::detectCores(logical = TRUE) - 1L)
+assert_file_exists(features_file, "features_file")
+assert_file_exists(feature_map_file, "feature_map_file")
 
-###### Get brain features and covariates
-### demog
-demog <- fread(paste0(path,"UKB/covariates/UKB54k_demogShort_220926.txt"),data.table=F)
-colnames(demog) <- c("eid","age","sex","scanner")
-demog$eid <- as.character(demog$eid)
+# Column mapping (allow callers to avoid UKB-specific names)
+colmap <- cfg$inputs$colmap %||% list()
+col_id      <- colmap$id      %||% "id"
+col_age     <- colmap$age     %||% "age"
+col_sex     <- colmap$sex     %||% "sex"
+col_scanner <- colmap$scanner %||% "scanner"
+col_icv     <- colmap$icv     %||% NULL  # optional
 
-### cortical data (left, right, area and thickness)
-lh_thick <- fread(paste0(ukbpath,"stats/batch_",batch,"/regularFSstats/lh.thickness.UKBB.txt"), header=T,data.table=F)
-rh_thick <- fread(paste0(ukbpath,"stats/batch_",batch,"/regularFSstats/rh.thickness.UKBB.txt"), header=T,data.table=F)
-colnames(lh_thick)[1] <- "MRID" -> colnames(rh_thick)[1]
-thick <- full_join(lh_thick,rh_thick,by="MRID")
-#thickFeats <- gsub("lh_","",colnames(lh_thick)[-1])
+# Normative parameters
+k_age <- cfg$normative$k_age %||% 10
+use_site_RE <- isTRUE(cfg$normative$use_site_RE %||% TRUE)
+sex_interact <- isTRUE(cfg$normative$sex_interact %||% FALSE)
 
-lh_area <- fread(paste0(ukbpath,"stats/batch_",batch,"/regularFSstats/lh.area.UKBB.txt"), header=T,data.table=F)
-rh_area <- fread(paste0(ukbpath,"stats/batch_",batch,"/regularFSstats/rh.area.UKBB.txt"), header=T,data.table=F)
-colnames(lh_area)[1] <- "MRID" -> colnames(rh_area)[1]
-area <- full_join(lh_area,rh_area,by="MRID")
-#areaFeats <- gsub("lh_","",colnames(lh_area)[-1])
+# -----------------------------
+# Runtime
+# -----------------------------
+n_cores <- cfg$runtime$n_cores %||% max(1L, parallel::detectCores(logical = TRUE) - 1L)
+future::plan(future::multisession, workers = n_cores)
 
-cortex <- full_join(thick,area,by="MRID")
+# -----------------------------
+# Outputs
+# -----------------------------
+out_stage <- stage_dir(opt$outdir, "normdev")
+out_qc    <- file.path(out_stage, "normative_qc.txt")
+out_z     <- file.path(out_stage, "deviations_z.txt")
+out_mu    <- file.path(out_stage, "predicted_means.txt")
+out_long  <- file.path(out_stage, "deviations_z_long.txt")
+out_raw   <- file.path(out_stage, "feats_rawVals.txt")
+out_sizes <- file.path(out_stage, "feats_avgSize.txt")
 
-### aseg, do some feature selection
-aseg <- fread(paste0(ukbpath,"stats/batch_",batch,"/regularFSstats/subcorticalstats.UKBB.txt"), header=T,data.table=F)
-colnames(aseg)[1] <- "MRID"
-#asegFeats <- substr(colnames(aseg)[grep("Left-",colnames(aseg))],6,30)
-asegNonhemi <- c("EstimatedTotalIntraCranialVol","3rd-Ventricle","4th-Ventricle","Brain-Stem","CC_Posterior","CC_Mid_Posterior","CC_Central",
-  "CC_Mid_Anterior","CC_Anterior")
-asegHemi <- c("Lateral-Ventricle","Inf-Lat-Vent","Cerebellum-Cortex","Thalamus-Proper","Caudate",
-  "Putamen","Pallidum","Hippocampus","Amygdala","Accumbens-area","VentralDC")
-aseg <- aseg[,c("MRID",asegNonhemi,paste0("Left-",asegHemi),paste0("Right-",asegHemi))]
-colnames(aseg)[-c(1,2)] <- paste0(colnames(aseg)[-c(1,2)],"_aseg")
+if (file.exists(out_long) && !opt$overwrite) {
+  stop("Output exists: ", out_long, " (use --overwrite)", call. = FALSE)
+}
 
-### combine all features and make names syntactic
-all <- full_join(aseg,cortex,by="MRID")
-all$MRID <- gsub("^FS_","",all$MRID)
-old_names <- names(all)
-names(all) <- gsub("-","_",names(all))
-names(all) <- make.names(names(all), unique = TRUE)
+# -----------------------------
+# Load inputs
+# -----------------------------
+dt_in <- fread(features_file, data.table = FALSE)
+fm <- fread(feature_map_file, data.table = FALSE)
 
-## Identify feature columns (also a place to exclude some, e.g. globals)
-feature_cols <- setdiff(names(all), c("MRID","EstimatedTotalIntraCranialVol",
-  "lh_MeanThickness_thickness","rh_MeanThickness_thickness","lh_WhiteSurfArea_area","rh_WhiteSurfArea_area"))
+req_fm_cols <- c("feature", "modality", "region")
+miss_fm <- setdiff(req_fm_cols, names(fm))
+if (length(miss_fm) > 0) stop("feature_map_file missing columns: ", paste(miss_fm, collapse = ", "), call. = FALSE)
 
-# write feature 'raw' values to file for input to calcFeatSize.R 
-write.table(all[,feature_cols],file=paste0(path,"integrity/df/feats_rawVals.txt"),sep = "\t",quote=FALSE,row.names=FALSE)
-dt <- inner_join(demog,all,by=c("eid"="MRID"))
+fm$feature <- as.character(fm$feature)
+fm$modality <- as.character(fm$modality)
+fm$region <- as.character(fm$region)
 
-# Tidy up common covariates, incl. residualizing ICV
-dt <- dt[complete.cases(dt[, c("age", "sex", "scanner", "EstimatedTotalIntraCranialVol")]), ]
+# Ensure unique mapping per feature
+if (any(duplicated(fm$feature))) {
+  dups <- unique(fm$feature[duplicated(fm$feature)])
+  stop("feature_map_file has duplicated 'feature' entries (must be unique). Examples: ", paste(head(dups, 5), collapse = ", "), call. = FALSE)
+}
+
+# Validate required covariate columns
+req_cols <- c(col_id, col_age, col_sex, col_scanner)
+miss_cov <- setdiff(req_cols, names(dt_in))
+if (length(miss_cov) > 0) {
+  stop("features_file missing required columns: ", paste(miss_cov, collapse = ", "), call. = FALSE)
+}
+
+# Validate feature columns
+feature_cols <- fm$feature
+miss_feat <- setdiff(feature_cols, names(dt_in))
+if (length(miss_feat) > 0) {
+  stop("features_file is missing feature columns referenced in feature_map_file. Examples: ",
+       paste(head(miss_feat, 8), collapse = ", "), call. = FALSE)
+}
+
+# Standardize column names internally
+dt <- dt_in %>%
+  dplyr::rename(
+    id = !!col_id,
+    age = !!col_age,
+    sex = !!col_sex,
+    scanner = !!col_scanner
+  )
+dt$id <- as.character(dt$id)
+
+# Handle ICV if provided
+if (!is.null(col_icv)) {
+  if (!col_icv %in% names(dt)) stop("colmap: icv column not found in features_file: ", col_icv, call. = FALSE)
+  dt <- dt %>% dplyr::rename(icv_raw = !!col_icv)
+}
+
+# Minimal completeness
+keep_cols <- c("id", "age", "sex", "scanner", feature_cols)
+if ("icv_raw" %in% names(dt)) keep_cols <- c(keep_cols, "icv_raw")
+dt <- dt[, unique(keep_cols)]
+
 dt$sex <- as.factor(dt$sex)
 dt$scanner <- as.factor(dt$scanner)
 
-icv_fit <- mgcv::gam(EstimatedTotalIntraCranialVol ~ s(age, k = 5, bs = "cs") + sex + s(scanner, bs = "re"),data = dt, method = "REML")
-dt$icv <- as.numeric(scale(resid(icv_fit, type = "response"), center = TRUE, scale = FALSE))
+# -----------------------------
+# Optional: ICV residualization
+#
+# If icv_raw is present, compute residualized icv (centred residual) and use it
+# as nuisance covariate for features that need ICV.
+# -----------------------------
+if ("icv_raw" %in% names(dt) && any(is.finite(dt$icv_raw))) {
+  icv_fit <- mgcv::gam(
+    icv_raw ~ s(age, k = 5, bs = "cs") + sex + s(scanner, bs = "re"),
+    data = dt, method = "REML", na.action = na.exclude
+  )
+  # IMPORTANT: keep length == nrow(dt). With na.exclude, residuals align to input rows with NAs.
+  dt$icv <- as.numeric(scale(stats::resid(icv_fit, type = "response"), center = TRUE, scale = FALSE))
+}
 
-# Modality-specific covariates, by default we include ICV for all features. Could change this to _area and _aseg only. 
-icv_feats <- grep("(_thickness|_area|_aseg)$", feature_cols,value=T)
-needs_icv <- function(feat) feat %in% icv_feats
+# Decide which modalities need ICV (default: SA + SubVol; CT typically does not).
+icv_modalities <- cfg$normative$icv_modalities %||% c("SA", "SubVol")
+needs_icv <- function(feat) {
+  m <- fm$modality[match(feat, fm$feature)]
+  !is.na(m) && (m %in% icv_modalities)
+}
 
-## Winsorizing
+# -----------------------------
+# Save raw values (debugging / downstream)
+# -----------------------------
+write.table(dt, file = out_raw, sep = "\t", quote = FALSE, row.names = FALSE)
+
+# -----------------------------
+# Feature sizes (raw, pre-winsorization)
+# -----------------------------
+feat_mean <- vapply(feature_cols, function(f) mean(dt[[f]], na.rm = TRUE), numeric(1))
+sizes_df <- fm %>%
+  dplyr::mutate(size = as.numeric(feat_mean[feature])) %>%
+  dplyr::select(modality, region, size)
+
+write.table(sizes_df, file = out_sizes, sep = "\t", quote = FALSE, row.names = FALSE)
+
+# -----------------------------
+# Winsorize feature values for modeling
+# -----------------------------
 dt_raw <- dt
 dt[feature_cols] <- lapply(dt[feature_cols], winsorize, lower = 0.001, upper = 0.999)
 
-## Feature include/exclude patterns
-# include_regex <- NULL  # e.g., "(_aseg|_area|_thickness)$"
-# exclude_regex <- NULL  # e.g., "^DWI_FA_" to skip certain metrics
-# if (!is.null(include_regex))  feature_cols <- feature_cols[grepl(include_regex, feature_cols)]
-# if (!is.null(exclude_regex))  feature_cols <- setdiff(feature_cols, grep(exclude_regex, feature_cols, value = TRUE))
-
-## Run normative modelling
+# -----------------------------
+# Fit normative models
+# -----------------------------
 cat(sprintf("Fitting %d features with %d workers...\n", length(feature_cols), n_cores))
-res_list <- future_lapply(feature_cols, fit_one_feature, future.seed = TRUE)
+res_list <- future_lapply(
+  feature_cols,
+  function(f) fit_one_feature(
+    feat = f,
+    dt = dt,
+    dt_raw = dt_raw,
+    k_age = k_age,
+    use_site_RE = use_site_RE,
+    sex_interact = sex_interact,
+    needs_icv = needs_icv
+  ),
+  future.seed = TRUE
+)
 
-## collect outputs
+future::plan(future::sequential)
+
+qc_df <- do.call(rbind, lapply(res_list, function(r) {
+  if (!is.list(r)) return(NULL)
+  data.frame(
+    feature = r$feat,
+    ok      = isTRUE(r$ok),
+    sigma   = r$sigma %||% NA_real_,
+    edf_age = r$edf_age %||% NA_real_,
+    r2      = r$r2 %||% NA_real_,
+    n_train = r$n_train %||% NA,
+    msg     = r$msg %||% NA_character_,
+    stringsAsFactors = FALSE
+  )
+}))
+
+write.table(qc_df, file = out_qc, sep = "\t", quote = FALSE, row.names = FALSE)
+
 ok_res <- Filter(function(x) is.list(x) && isTRUE(x$ok), res_list)
-fail_res <- Filter(function(x) is.list(x) && !isTRUE(x$ok), res_list)
 
-# Deviations matrix (subjects × features)
-Z <- data.table(eid = dt$eid)
-MU <- data.table(eid = dt$eid)
-
+Z <- data.table(id = dt$id)
+MU <- data.table(id = dt$id)
 for (r in ok_res) {
   Z[[r$feat]]  <- r$z
   MU[[r$feat]] <- r$mu
 }
 
-## Write outputs
-write.table(Z,file=paste0(path,"integrity/df/deviations_z.txt"),sep = "\t",quote=FALSE,row.names=FALSE)
-write.table(MU,file=paste0(path,"integrity/df/predicted_means.txt"),sep = "\t",quote=FALSE,row.names=FALSE)
+write.table(Z,  file = out_z,  sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(MU, file = out_mu, sep = "\t", quote = FALSE, row.names = FALSE)
 
-## make z long form for NMI calculation (run_nmi.R)
-#Z <- fread(paste0(path,"integrity/df/deviations_z.txt"),data.table=F)
-Z <- as.data.frame(Z)
+# Long format using feature_map
+Z_df <- as.data.frame(Z)
+zs_long <- Z_df %>%
+  tidyr::pivot_longer(
+    cols = -id,
+    names_to = "feature",
+    values_to = "z"
+  ) %>%
+  dplyr::left_join(fm, by = "feature") %>%
+  dplyr::filter(!is.na(modality) & !is.na(region)) %>%
+  dplyr::select(id, modality, region, z)
 
-# Pick feature columns by suffix
-fc   <- grep("(_thickness|_area|_aseg)$", names(Z), value = TRUE, ignore.case = TRUE)
-# Flatten values + build keys
-vals <- as.numeric(as.matrix(Z[fc]))
-feat <- rep(fc, each = nrow(Z))
-sid  <- rep(Z$eid, times = length(fc))
-# Modality & region
-mod  <- ifelse(grepl("_thickness$", feat, ignore.case=TRUE), "CT",
-        ifelse(grepl("_area$",     feat, ignore.case=TRUE), "SA",
-        ifelse(grepl("_aseg$",     feat, ignore.case=TRUE), "SubVol", NA)))
-reg  <- sub("_thickness$|_area$|_aseg$", "", feat)
+write.table(zs_long, file = out_long, sep = "\t", quote = FALSE, row.names = FALSE)
 
-zs_long <- data.frame(eid = as.character(sid),modality = mod,region = reg,z = vals,stringsAsFactors = FALSE)
-zs_long <- zs_long[!is.na(zs_long$modality), ]
-
-write.table(zs_long,file=paste0(path,"integrity/df/deviations_z_long.txt"),sep = "\t",quote=FALSE,row.names=FALSE)
+cat("Wrote: ", out_long, "\n")

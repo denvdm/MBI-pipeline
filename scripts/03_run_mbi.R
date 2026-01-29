@@ -1,40 +1,52 @@
-# Compute MBI, GBI, and MDA metrics from normative deviations and PET weighting matrices.
-# Wrapper around the compute_mbi() functions in R/.
+#!/usr/bin/env Rscript
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(data.table)
+})
 
-###### load packages, set paths and load functions
-library(dplyr,data.table,stringr,tidyr)
+source("helpers/run_helpers.R")
+opt <- parse_common_args()
+cfg <- read_config(opt$config)
 
-path <- "/path/to/data"
-source("R/compute_mbi.R")
+source_local("compute_mbi.R")
 
-#=============================================================================
-# NMI FLAGSHIP: FDG × tissue-size weighting + sign-aware oriented z (see func)
-#=============================================================================
-### read in deviations (from normative modeling), feature sizes (for scaling), and processed pet (median) values
-zs <- fread(paste0(path,"df/deviations_z_long.txt"),data.table=F)
-size_df <- fread(paste0(path,"df/feats_avgSize.txt"),data.table=F)
-fdg <- fread(paste0(path,"df/pet_fdg_featMedians.txt"),data.table=F)
+# in/out
+normdev_long <- cfg$inputs$deviations_z_long %||% file.path(opt$outdir, "normdev", "deviations_z_long.txt")
+sizes_file   <- cfg$inputs$feat_sizes        %||% file.path(opt$outdir, "normdev", "feats_avgSize.txt")
+fdg_file     <- cfg$inputs$pet_weights       %||% file.path(opt$outdir, "extract_pet", "pet_fdg_featMedians.txt")
 
-## remove small subvol regions to lower noise
-keep_sub <- size_df %>% filter(modality=="SubVol", size >= quantile(size, 0.20, na.rm=TRUE)) %>% pull(region)
-zs <- zs %>% filter(modality!="SubVol" | region %in% keep_sub)
+assert_file_exists(normdev_long, "deviations_z_long")
+assert_file_exists(sizes_file,   "feat_sizes (feats_avgSize.txt)")
+assert_file_exists(fdg_file,     "pet_weights (pet_fdg_featMedians.txt)")
 
-## Compute GBI, MBI and tilt (MDA)
+out_stage <- stage_dir(opt$outdir, "compute_mbi")
+out_scores <- file.path(out_stage, "mbi_flagship_scores.txt")
+
+if (file.exists(out_scores) && !opt$overwrite) {
+  stop("Output exists: ", out_scores, " (use --overwrite)", call. = FALSE)
+}
+
+zs <- fread(normdev_long, data.table = FALSE) %>% mutate(region = as.character(region), modality = as.character(modality))
+size_df <- fread(sizes_file, data.table = FALSE) %>% mutate(region = as.character(region),modality = as.character(modality))
+fdg <- fread(fdg_file, data.table = FALSE) %>% mutate(region = as.character(region))
+
+# gating
+keep_sub <- size_df %>% dplyr::filter(modality=="SubVol", size >= quantile(size, 0.20, na.rm=TRUE)) %>% dplyr::pull(region)
+zs <- zs %>% dplyr::filter(modality!="SubVol" | region %in% keep_sub)
+
+# Parameters, overridable via config
+beta  <- cfg$mbi$beta  %||% 0.25
+gamma <- cfg$mbi$gamma %||% 2.5
+alpha <- cfg$mbi$alpha %||% NULL
+cap_frac <- cfg$mbi$cap_frac %||% 0.05
+coverage_thr <- cfg$mbi$coverage_thr %||% 0.80
+
 res <- compute_flagship_abg(
-  zs      = zs,
-  fdg     = fdg,
-  sizes   = size_df,
-  beta    = 0.25,         # your β
-  gamma   = 2.5,          # your γ
-  alpha   = NULL,         # NULL = equal α across available modalities, alt e.g.: c(CT = 0.40, SA = 0.40, SubVol = 0.20)
-  cap_frac     = 0.05,
-  coverage_thr = 0.80
+  zs = zs, fdg = fdg, sizes = size_df,
+  beta = beta, gamma = gamma, alpha = alpha,
+  cap_frac = cap_frac, coverage_thr = coverage_thr
 )
-## extract metrics and write output
-# nmi <- left_join(res_fdg$NMI[c("eid","NMI")],res_unw$NMI[c("eid","NMI")],by="eid")
-# colnames(nmi) <- c("eid","nmi","gbi")
-mbi <- as.data.frame(res$scores)
-write.table(mbi,file=paste0(path,"df/mbi_flagship_scores.txt"),sep = "\t",quote=FALSE,row.names=FALSE)
 
-## some checks
-cor(mbi$gbi,mbi$mbi)
+mbi <- as.data.frame(res$scores)
+write.table(mbi, file = out_scores, sep = "\t", quote = FALSE, row.names = FALSE)
+cat("Wrote: ", out_scores, "\n")

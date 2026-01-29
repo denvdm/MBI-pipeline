@@ -1,0 +1,24 @@
+Package: mbi-pipeline
+Type: Package
+Title: Metabolic Brain Index (MBI) Pipeline
+Version: 0.1.0
+Authors@R: c(
+    person("Dennis", "van der Meer", role = c("aut","cre"))
+)
+Description: Pipeline to compute normative deviations from structural MRI and derive PET-weighted brain integrity metrics (MBI/GBI/MDA).
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Imports:
+    optparse,
+    yaml,
+    data.table,
+    dplyr,
+    tidyr,
+    future,
+    future.apply,
+    mgcv,
+    matrixStats,
+    RNifti,
+    broom
+RoxygenNote: 7.3.2

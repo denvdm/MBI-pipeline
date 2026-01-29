@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 """
 prep_fsaverage_to_pet.py
 Register fsaverage volumetric atlas to MNI space, then resample to PET grid for R extraction.
@@ -43,7 +43,7 @@ def parse_args():
     ap.add_argument('--mni', required=True, help='MNI T1 template NIfTI (e.g., MNI152_T1_1mm.nii.gz)')
     ap.add_argument('--fsavg-dir', required=True, help='FreeSurfer fsaverage SUBJECTS_DIR/fsaverage directory')
     ap.add_argument('--fsavg-brain', default=None, help='Override: fsaverage brain image (defaults to mri/brain.mgz or T1.mgz)')
-    ap. add_argument('--fsavg-atlas', default=None, help='Override: fsaverage aparc+aseg label (defaults to mri/aparc+aseg.mgz)')
+    ap.add_argument('--fsavg-atlas', default=None, help='Override: fsaverage aparc+aseg label (defaults to mri/aparc+aseg.mgz)')
     ap.add_argument('--atlas-out', default='aparc+aseg_inPETspace_3mm.nii.gz', help='Output atlas resampled to PET grid')
     ap.add_argument('--gm', default=None, help='GM probability map (MNI space) to resample to PET grid (optional)')
     ap.add_argument('--gm-out', default='GMprob_inPETspace_3mm.nii.gz', help='Output GM prob resampled to PET grid')

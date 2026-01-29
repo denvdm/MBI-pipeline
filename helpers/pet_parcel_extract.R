@@ -1,6 +1,4 @@
-# Tools for extracting PET intensity values per region from templates or subject-level maps.
-# Handles parcellation lookup, masking, winsorization, and basic QC.
-
+# pet_parcel_extract.R — PET→parcel extraction (GM mask + median) with robust QC
 # Dependencies: RNifti (for NIfTI I/O). Uses base R for speed and minimal deps.
 # Exposes:
 #   pet_parcel_extract(pet, atlas, gm_prob=NULL, gm_thr=0.20, use_median=TRUE,

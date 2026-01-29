@@ -1,0 +1,71 @@
+# Configuration for the MBI pipeline
+#
+# Notes
+# - Paths can be absolute, relative, use ~, or reference environment variables like ${PROJECT_ROOT}.
+# - The core pipeline consumes a generic feature table (features_file + feature_map_file).
+# - The FreeSurfer section is optional and only used by the included adapter script.
+
+paths:
+  # Directory containing PET/atlas/GM/LUT resources used for PET-weight extraction
+  maps_dir: "${MAPS_DIR}"
+
+  # Optional: directory containing FreeSurfer-exported stats tables (only needed if you run the
+  # FreeSurfer adapter script to produce features_wide.tsv + feature_map.tsv).
+  freesurfer_stats_dir: "${FREESURFER_STATS_DIR}"
+
+inputs:
+  # PET / maps (used in PET-weight extraction). If null, defaults are resolved relative to paths.maps_dir.
+  pet_file: null
+  atlas_file: null
+  gm_file: null
+  lut_file: null
+
+  # Generic inputs (required for normative deviations)
+  features_file: "${FEATURES_FILE}"            # e.g. out/features/features_wide.tsv
+  feature_map_file: "${FEATURE_MAP_FILE}"      # e.g. out/features/feature_map.tsv
+
+  # Optional: demographics file used by the FreeSurfer adapter (ignored by the core pipeline)
+  demographics_file: "${DEMOGRAPHICS_FILE}"
+
+  # Column mapping for the generic feature table
+  colmap:
+    id: "id"
+    age: "age"
+    sex: "sex"
+    scanner: "scanner"
+    icv: "icv_raw"        # set to null if not present
+
+  # Optional: FreeSurfer export filenames (only used by the FreeSurfer adapter)
+  freesurfer_files:
+    lh_thickness: "lh.thickness.UKBB.txt"
+    rh_thickness: "rh.thickness.UKBB.txt"
+    lh_area: "lh.area.UKBB.txt"
+    rh_area: "rh.area.UKBB.txt"
+    aseg: "subcorticalstats.UKBB.txt"
+
+  # Optional overrides if you run stages out of order
+  # deviations_z_long: "/path/to/normdev/deviations_z_long.txt"
+  # pet_weights: "/path/to/pet/pet_fdg_featMedians.txt"
+  # feat_sizes: "/path/to/normdev/feats_avgSize.txt"
+
+normative:
+  k_age: 10
+  use_site_RE: true
+  sex_interact: false
+
+  # Modalities that should include ICV as a covariate if icv is available
+  icv_modalities: ["SA", "SubVol"]
+
+runtime:
+  n_cores: 12
+
+mbi:
+  beta: 0.25
+  gamma: 2.5
+  alpha: null
+  cap_frac: 0.05
+  coverage_thr: 0.80
+
+qc:
+  mods_use: ["CT", "SA", "SubVol"]
+  subvol_gate_pct: 0.20
