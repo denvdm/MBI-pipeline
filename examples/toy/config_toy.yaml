@@ -1,0 +1,26 @@
+# Toy config for smoke-testing the MBI pipeline.
+# Adjust keys to match your pipeline's expected config schema.
+
+toy: true
+
+paths:
+  features_wide: "examples/toy/input/toy_features_wide.tsv"
+  feature_map: "examples/toy/input/toy_feature_map.tsv"
+  outdir: "examples/toy/output"
+
+columns:
+  id: "eid"
+  age: "age"
+  sex: "sex"
+  site: "site"
+  icv: "icv"
+
+# Keep modeling intentionally simple for smoke test
+normative_model:
+  method: "gam"
+  k_age: 4
+  include_site_re: false
+
+mbi:
+  weight_cap_fraction: 0.10
+  residualize_against_gbi: true

@@ -11,3 +11,6 @@ out/
 # R session junk
 .Rhistory
 .RData
+
+# Toy example outputs
+examples/toy/output/
