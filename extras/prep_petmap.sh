@@ -14,8 +14,8 @@ set -euo pipefail
 # Root of this repo (where helpers/prep_fsaverage_to_pet.py lives)
 PROJECT_ROOT="${PROJECT_ROOT:-$PWD}" #/ess/p33/cluster/ukbio_users/dennisva/mbi-pipeline
 
-# Where your PET/map resources live
-MAPS_DIR="${MAPS_DIR:-/path/to/neuromaps}" #/ess/p33/cluster/ukbio_users/dennisva/mbi_ukb/neuromaps
+# Where PET and MRI maps live
+MAPS_DIR="${MAPS_DIR:-/path/to/maps}" #/ess/p33/cluster/ukbio_users/dennisva/mbi_ukb/neuromaps
 
 # FreeSurfer fsaverage directory (set FREESURFER_HOME or set FSAVG_DIR directly)
 FREESURFER_HOME="${FREESURFER_HOME:-/path/to/freesurfer}" #/cluster/software/EL9/amd/zen/easybuild/software/FreeSurfer/5.3.0-centos6_x86_64
