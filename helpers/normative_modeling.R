@@ -54,7 +54,8 @@ fit_one_feature <- function(feat,
                             k_age = 10,
                             use_site_RE = TRUE,
                             sex_interact = FALSE,
-                            needs_icv = function(x) FALSE) {
+                            needs_icv = function(x) FALSE,
+                            train_mask = NULL) {
   # Defensive checks
   if (!feat %in% names(dt)) {
     return(list(ok = FALSE, feat = feat, msg = "feature not found"))
@@ -76,12 +77,15 @@ fit_one_feature <- function(feat,
 
   # mgcv will drop rows with missing RHS; we also require finite y and age.
   idx <- which(is.finite(y) & is.finite(dt$age))
-  if (length(idx) < 50L) {
+
+  # If train_mask provided, fit only on training subjects
+  train_idx <- if (!is.null(train_mask)) intersect(idx, which(train_mask)) else idx
+  if (length(train_idx) < 50L) {
     return(list(ok = FALSE, feat = feat, msg = "too few observations"))
   }
 
-  dsub <- dt[idx, , drop = FALSE]
-  dsub[[feat]] <- y[idx]
+  dsub <- dt[train_idx, , drop = FALSE]
+  dsub[[feat]] <- y[train_idx]
 
   fit <- try(mgcv::gam(frm, data = dsub, method = "REML", family = gaussian), silent = TRUE)
   if (inherits(fit, "try-error")) {

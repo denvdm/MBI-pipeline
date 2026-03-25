@@ -118,6 +118,21 @@ dt$sex <- as.factor(dt$sex)
 dt$scanner <- as.factor(dt$scanner)
 
 # -----------------------------
+# Optional: discovery/replication split
+# If TRAIN_IDS is set, normative models are fit on those IDs only.
+# Z-scores are still computed for ALL subjects.
+# -----------------------------
+train_ids_file <- Sys.getenv("TRAIN_IDS", "")
+train_mask <- rep(TRUE, nrow(dt))
+
+if (nzchar(train_ids_file) && file.exists(train_ids_file)) {
+  train_ids <- fread(train_ids_file, select = "id")$id
+  train_mask <- dt$id %in% as.character(train_ids)
+  cat(sprintf("[split] Fitting normative models on %d/%d subjects (discovery)\n",
+              sum(train_mask), nrow(dt)))
+}
+
+# -----------------------------
 # Optional: ICV residualization
 #
 # If icv_raw is present, compute residualized icv (centred residual) and use it
@@ -126,10 +141,10 @@ dt$scanner <- as.factor(dt$scanner)
 if ("icv_raw" %in% names(dt) && any(is.finite(dt$icv_raw))) {
   icv_fit <- mgcv::gam(
     icv_raw ~ s(age, k = 5, bs = "cs") + sex + s(scanner, bs = "re"),
-    data = dt, method = "REML", na.action = na.exclude
+    data = dt[train_mask, ], method = "REML", na.action = na.exclude
   )
-  # IMPORTANT: keep length == nrow(dt). With na.exclude, residuals align to input rows with NAs.
-  dt$icv <- as.numeric(scale(stats::resid(icv_fit, type = "response"), center = TRUE, scale = FALSE))
+  icv_pred <- predict(icv_fit, newdata = dt, type = "response")
+  dt$icv <- as.numeric(scale(dt$icv_raw - icv_pred, center = TRUE, scale = FALSE))
 }
 
 # Decide which modalities need ICV (default: SA + SubVol; CT typically does not).
@@ -173,7 +188,8 @@ res_list <- future_lapply(
     k_age = k_age,
     use_site_RE = use_site_RE,
     sex_interact = sex_interact,
-    needs_icv = needs_icv
+    needs_icv = needs_icv,
+    train_mask = train_mask
   ),
   future.seed = TRUE
 )
