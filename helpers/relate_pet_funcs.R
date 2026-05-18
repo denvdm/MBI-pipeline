@@ -58,6 +58,8 @@ fisher_mean_ci <- function(r_vec, n_vec, conf = 0.95) {
 # --- SubVol gate + collapse to (id,region) once ------------------------------
 
 gate_subvol <- function(zs, size_df, pct = 0.20) {
+  # Two-step filter so quantile() is computed within SubVol only,
+  # not over the full size_df (which would mix CT/SA/SubVol scales).
   keep_sub <- size_df %>%
     dplyr::filter(modality == "SubVol") %>%
     dplyr::filter(size >= quantile(size, pct, na.rm = TRUE)) %>%

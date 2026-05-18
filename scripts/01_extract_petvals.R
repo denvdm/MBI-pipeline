@@ -48,8 +48,15 @@ fdg_raw <- res$parcels |>
                 nvox_used = n_used, nvox_total = n_total, region = ROI_Name)
 
 colnames(fdg_raw) <- c("index","fdg_median","fdg_mean","p05","p95","nvox_used","nvox_total","coverage","region")
-fdg_raw$region <- gsub("^ctx-","",fdg_raw$region)
-fdg_raw$region <- gsub("-","_",fdg_raw$region)
+
+# Normalise region names to match the adapter's canonical form:
+#   - strip "ctx-" prefix from cortical
+#   - convert "-" to "_"
+#   - rename "Left_*" / "Right_*" subcortical to "lh_*" / "rh_*"
+fdg_raw$region <- gsub("^ctx-",   "",    fdg_raw$region)
+fdg_raw$region <- gsub("-",       "_",   fdg_raw$region)
+fdg_raw$region <- gsub("^Left_",  "lh_", fdg_raw$region)
+fdg_raw$region <- gsub("^Right_", "rh_", fdg_raw$region)
 fdg_raw$region <- make.names(fdg_raw$region, unique = TRUE)
 
 fdg_raw$fdg_z <- scale(fdg_raw$fdg_median)

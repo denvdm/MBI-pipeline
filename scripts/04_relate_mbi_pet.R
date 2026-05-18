@@ -26,8 +26,10 @@ zs <- fread(normdev_long, data.table = FALSE)
 size_df <- fread(sizes_file, data.table = FALSE)
 fdg <- fread(fdg_file, data.table = FALSE)
 
-mods_use <- cfg$qc$mods_use %||% c("CT","SA","SubVol")
-subvol_gate_pct <- cfg$qc$subvol_gate_pct %||% 0.20
+# subvol_gate_pct is sourced from cfg$mbi (single source of truth, consumed
+# by both stage 03 and this stage so the QC sees the same gate that MBI did).
+mods_use        <- cfg$qc$mods_use         %||% c("CT","SA","SubVol")
+subvol_gate_pct <- cfg$mbi$subvol_gate_pct %||% 0.20
 
 fdg_use <- prep_fdg(fdg)
 zs_gated <- gate_subvol(zs, size_df, pct = subvol_gate_pct)

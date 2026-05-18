@@ -63,9 +63,9 @@ mbi:
   beta: 0.25
   gamma: 2.5
   alpha: null
-  cap_frac: 0.05
+  winsor_q: 0.99          # winsorise FDG-PET weights at this quantile of positives before ^gamma
   coverage_thr: 0.80
+  subvol_gate_pct: 0.20   # drop the smallest p<gate> of SubVol regions; single source of truth (consumed by both stage 03 and 04)
 
 qc:
   mods_use: ["CT", "SA", "SubVol"]
-  subvol_gate_pct: 0.20

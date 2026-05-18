@@ -1,83 +1,51 @@
 #!/usr/bin/env Rscript
+# Calibrate (gamma, beta) for the MBI PET/size weighting on an existing run.
+# Sweeps a grid, evaluates each (gamma, beta) via subject-level alignment
+# between MBI and the per-subject r_tilt target (Spearman of regional
+# deviations vs PET weights), writes a results TSV.
+#
+# Reads:
+#   <outdir>/normdev/deviations_z_long.txt
+#   <outdir>/normdev/feats_avgSize.txt
+#   <outdir>/extract_pet/pet_fdg_featMedians.txt
+# Writes:
+#   <outdir>/calibration/calibration_grid_results.tsv
 
 suppressPackageStartupMessages({
-  library(optparse)
-  library(yaml)
-  library(data.table)
   library(dplyr)
-  library(tidyr)
+  library(data.table)
+  library(optparse)
 })
 
 # ------------------------------------------------------------
 # USER: EDIT HERE (calibration grid)
 # ------------------------------------------------------------
-# Grid-search hyperparameters for the PET/size weighting.
-# Keep modest unless you have serious compute.
-gammas <- c(2.2, 2.3, 2.4, 2.5)
-betas  <- c(0.30, 0.25, 0.20)
+gammas <- seq(1.0, 4.0, by = 0.25)   # 13 values
+betas  <- seq(0.0, 0.5, by = 0.05)   # 11 values
 
-# Modalities used for r_tilt target (alignment of deviations with PET weights)
+# Modalities used for the r_tilt target (alignment of deviations with PET weights)
 mods_use <- c("CT", "SA")
 
-# Gate smallest SubVol regions (quantile cutoff)
-subvol_gate_pct <- 0.20
+# SubVol size gate (passed through; the actual gate value comes from config)
 # ------------------------------------------------------------
 
+source("helpers/run_helpers.R")
+opt <- parse_common_args()
+cfg <- read_config(opt$config)
 
-# -----------------------------
-# CLI
-# -----------------------------
-option_list <- list(
-  make_option(c("--config"), type = "character", default = NULL,
-              help = "Path to YAML config used by the main pipeline (required)."),
-  make_option(c("--outdir"), type = "character", default = NULL,
-              help = "Pipeline output directory (required)."),
-  make_option(c("--overwrite"), action = "store_true", default = FALSE,
-              help = "Overwrite outputs if they exist.")
-)
-opt <- parse_args(OptionParser(option_list = option_list))
-if (is.null(opt$config) || is.null(opt$outdir)) {
-  cat("\n[ERROR] --config and --outdir are required.\n\n", file = stderr())
-  quit(status = 1)
-}
+source_local("compute_mbi.R")
 
-cfg <- yaml::read_yaml(opt$config)
-
-# -----------------------------
-# Resolve repository root robustly (so sourcing works from anywhere)
-# -----------------------------
-get_script_dir <- function() {
-  arg <- commandArgs(trailingOnly = FALSE)
-  f <- sub("^--file=", "", arg[grepl("^--file=", arg)])
-  if (length(f) == 0) return(getwd())
-  dirname(normalizePath(f))
-}
-repo_root_path <- normalizePath(file.path(get_script_dir(), ".."))
-
-# Source helpers
-source(file.path(repo_root_path, "helpers", "run_helpers.R"))
-source(file.path(repo_root_path, "helpers", "compute_mbi.R"))
-
-# -----------------------------
-# Local utilities (keep explicit, do not rely on run_helpers internals)
-# -----------------------------
-assert_file_exists <- function(path, label = NULL) {
-  if (!file.exists(path)) {
-    msg <- paste0("[ERROR] Missing file",
-                  if (!is.null(label)) paste0(" (", label, ")") else "",
-                  ": ", path, "\n")
-    stop(msg, call. = FALSE)
-  }
-}
+# Local helper for stage dir (avoids tight coupling with run_helpers internals)
 stage_dir_local <- function(outdir, stage) {
-  dir <- file.path(outdir, stage)
-  if (!dir.exists(dir)) dir.create(dir, recursive = TRUE, showWarnings = FALSE)
-  dir
+  d <- file.path(outdir, stage)
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  d
 }
 
-# -----------------------------
-# Resolve inputs from staged pipeline outputs (CURRENT naming)
-# -----------------------------
+subvol_gate_pct <- cfg$mbi$subvol_gate_pct %||% 0.20
+winsor_q        <- cfg$mbi$winsor_q        %||% 0.99
+coverage_thr    <- cfg$mbi$coverage_thr    %||% 0.80
+
 normdev_dir <- file.path(opt$outdir, "normdev")
 pet_dir     <- file.path(opt$outdir, "extract_pet")
 cal_dir     <- stage_dir_local(opt$outdir, "calibration")
@@ -94,7 +62,7 @@ zs      <- fread(zs_file, data.table = FALSE)
 size_df <- fread(sizes_file, data.table = FALSE)
 fdg     <- fread(fdg_file, data.table = FALSE)
 
-# Validate expected columns (current pipeline)
+# Validate expected columns
 req_zs <- c("id", "modality", "region", "z")
 req_sz <- c("modality", "region", "size")
 if (!all(req_zs %in% names(zs))) {
@@ -117,12 +85,12 @@ fdg_use <- if ("weight" %in% names(fdg)) {
 }
 
 # -----------------------------
-# SubVol gating (match main pipeline default)
+# SubVol gating (matches main pipeline). Two-step filter so quantile()
+# is computed within SubVol only.
 # -----------------------------
 keep_sub <- size_df %>%
-  filter(modality == "SubVol",
-         is.finite(size),
-         size >= quantile(size, subvol_gate_pct, na.rm = TRUE)) %>%
+  filter(modality == "SubVol") %>%
+  filter(is.finite(size), size >= quantile(size, subvol_gate_pct, na.rm = TRUE)) %>%
   pull(region)
 
 zs <- zs %>% filter(modality != "SubVol" | region %in% keep_sub)
@@ -130,7 +98,6 @@ zs <- zs %>% filter(modality != "SubVol" | region %in% keep_sub)
 # -----------------------------
 # Compute r_tilt using the SAME orientation logic as MBI
 # -----------------------------
-# compute_oriented() is defined in helpers/compute_mbi.R
 zo <- compute_oriented(zs)
 
 mods_use <- unique(trimws(mods_use))
@@ -147,39 +114,43 @@ r_tilt_df <- zo %>%
   )
 
 # -----------------------------
-# Grid evaluation (CURRENT score names: id, mbi_raw, gbi, mbi)
+# Grid evaluation
 # -----------------------------
-grid <- expand.grid(gamma = gammas, beta = betas, KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+grid <- expand.grid(gamma = gammas, beta = betas,
+                    KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+cat(sprintf("[INFO] Sweeping %d cells (gamma: %.2f-%.2f, beta: %.2f-%.2f)\n",
+            nrow(grid), min(gammas), max(gammas), min(betas), max(betas)))
 
 eval_one <- function(g, b) {
   res <- compute_flagship_abg(
     zs = zs, fdg = fdg_use %>% rename(weight = w_pet), sizes = size_df,
     beta = b, gamma = g,
     alpha = cfg$mbi$alpha %||% NULL,
-    cap_frac = cfg$mbi$cap_frac %||% 0.05,
-    coverage_thr = cfg$mbi$coverage_thr %||% 0.80
+    winsor_q     = winsor_q,
+    coverage_thr = coverage_thr
   )
   scores <- as.data.frame(res$scores)
 
-  # corr between size-weighted (gbi) and PET-weighted (mbi_raw)
   corr_unw_pet <- suppressWarnings(cor(scores$gbi, scores$mbi_raw, use = "pairwise.complete.obs"))
 
-  # alignment between residualized MBI (mbi) and r_tilt
   tmp <- inner_join(scores[, c("id", "mbi")], r_tilt_df, by = "id")
   mbi_map_r <- suppressWarnings(cor(tmp$mbi, tmp$r_tilt, use = "pairwise.complete.obs"))
 
   data.frame(gamma = g, beta = b, corr_unw_pet = corr_unw_pet, mbi_map_r = mbi_map_r)
 }
 
-evals <- do.call(rbind, lapply(seq_len(nrow(grid)), function(i) eval_one(grid$gamma[i], grid$beta[i])))
+evals <- do.call(rbind, lapply(seq_len(nrow(grid)), function(i) {
+  if (i %% 20 == 0) cat(sprintf("  ... cell %d/%d\n", i, nrow(grid)))
+  eval_one(grid$gamma[i], grid$beta[i])
+}))
 tab <- evals %>% arrange(desc(mbi_map_r))
 
 out_file <- file.path(cal_dir, "calibration_grid_results.tsv")
-if (file.exists(out_file) && !opt$overwrite) {
-  stop("[ERROR] Output exists: ", out_file, " (use --overwrite)", call. = FALSE)
-}
-write.table(tab, file = out_file, sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(tab, file = out_file, sep = "\t",
+            row.names = FALSE, quote = FALSE)
 
 cat("[OK] Wrote: ", out_file, "\n", sep = "")
 cat("[OK] Best row (by mbi_map_r):\n")
 print(tab[1, , drop = FALSE])
+cat("[OK] Current settings (gamma=2.5, beta=0.25):\n")
+print(tab[tab$gamma == 2.5 & tab$beta == 0.25, , drop = FALSE])

@@ -1,4 +1,23 @@
 #!/usr/bin/env Rscript
+# prep_features.R
+#
+# FreeSurfer/UKBB → features_wide.tsv + feature_map.tsv adapter.
+#
+# Reads:
+#   - demographics file (id, age, sex, scanner, optional icv)
+#   - FreeSurfer cortical + aseg stats tables
+# Writes:
+#   - features_wide.tsv : subject × (covariates + features)
+#   - feature_map.tsv   : feature → (modality, region) map
+#
+# Ventricles (lateral, inferior, 3rd, 4th, 5th) are intentionally excluded:
+# they carry essentially no metabolic signal, and any apparent FDG signal in
+# ventricular voxels reflects partial-volume effects rather than biology.
+#
+# Aseg names are normalised to canonical lh_*/rh_* form, accepting both old
+# FreeSurferColorLUT-style ("Left-Thalamus-Proper") and new UKB-stats-style
+# ("lh_Thalamus_Proper") inputs.
+
 rm(list = ls())
 
 suppressPackageStartupMessages({
@@ -105,19 +124,42 @@ cortex <- dplyr::full_join(thick, area, by = "MRID")
 
 aseg <- read_fs(file.path(fs_dir, f_aseg))
 
-# Pragmatic aseg selection (matches your current PET/LUT conventions)
+# --- Normalise aseg column names to a canonical form ---------------------
+# Accepts both old (FreeSurferColorLUT-style: "Left-Thalamus-Proper") and
+# new UKB-stats-style ("lh_Thalamus_Proper") and converts both to lh_*/rh_*
+# with underscore separators. Ventricle digit prefixes normalised.
+normalise_aseg_names <- function(nm) {
+  nm <- gsub("^Left-",  "lh_", nm)
+  nm <- gsub("^Right-", "rh_", nm)
+  nm <- gsub("^Left_",  "lh_", nm)
+  nm <- gsub("^Right_", "rh_", nm)
+  nm <- gsub("-", "_", nm)
+  nm <- gsub("^Third_",  "3rd_", nm)
+  nm <- gsub("^Fourth_", "4th_", nm)
+  nm <- gsub("^Fifth_",  "5th_", nm)
+  nm
+}
+names(aseg) <- normalise_aseg_names(names(aseg))
+
+# Pragmatic aseg selection (canonical names; accepts either FS naming convention).
+# Ventricles are intentionally excluded (no real metabolic signal; any apparent
+# FDG in ventricular voxels is partial-volume or other artefact).
 asegNonhemi <- c(
-  "EstimatedTotalIntraCranialVol","3rd-Ventricle","4th-Ventricle","Brain-Stem",
+  "EstimatedTotalIntraCranialVol",
+  "Brain_Stem",
   "CC_Posterior","CC_Mid_Posterior","CC_Central","CC_Mid_Anterior","CC_Anterior"
 )
 asegHemi <- c(
-  "Lateral-Ventricle","Inf-Lat-Vent","Cerebellum-Cortex","Thalamus-Proper","Caudate",
-  "Putamen","Pallidum","Hippocampus","Amygdala","Accumbens-area","VentralDC"
+  "Cerebellum_Cortex","Thalamus_Proper","Caudate",
+  "Putamen","Pallidum","Hippocampus","Amygdala","Accumbens_area","VentralDC"
 )
 
-keep_aseg <- c("MRID", asegNonhemi, paste0("Left-",asegHemi), paste0("Right-",asegHemi))
+keep_aseg <- c("MRID", asegNonhemi, paste0("lh_", asegHemi), paste0("rh_", asegHemi))
 keep_aseg <- keep_aseg[keep_aseg %in% names(aseg)]
 aseg <- aseg[, keep_aseg, drop = FALSE]
+
+cat(sprintf("[adapter] aseg features kept: %d (of expected up to %d)\n",
+            length(keep_aseg) - 1L, length(asegNonhemi) + 2 * length(asegHemi)))
 
 # Suffix aseg features (except ICV) for modality mapping
 if ("EstimatedTotalIntraCranialVol" %in% names(aseg)) {
@@ -160,8 +202,10 @@ fm <- data.frame(
 )
 fm <- fm[!is.na(fm$modality), ]
 
-# Restrict wide table to mapped features + covariates
-# Note: keep covariates first for readability.
+cat(sprintf("[adapter] feature counts by modality: %s\n",
+            paste(sprintf("%s=%d", names(table(fm$modality)), as.vector(table(fm$modality))), collapse = ", ")))
+
+# Restrict wide table to mapped features + covariates (covariates first for readability)
 dt_wide <- dt[, c(cov_cols, fm$feature), drop = FALSE]
 
 write.table(dt_wide, file = out_wide, sep = "\t", quote = FALSE, row.names = FALSE)
