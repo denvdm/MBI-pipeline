@@ -1,26 +1,49 @@
-# Toy config for smoke-testing the MBI pipeline.
-# Adjust keys to match your pipeline's expected config schema.
-
-toy: true
+# Toy configuration for smoke-testing the MBI pipeline.
+#
+# This drives examples/toy/run_toy_example.R, a self-contained smoke
+# test that runs the real index computation (helpers/compute_mbi.R) on
+# a 10-subject synthetic cohort. It deliberately does NOT use the strict
+# generic-config schema consumed by the stage scripts (config_generic.yaml):
+# the toy needs no PET NIfTI maps and no FreeSurfer stats. Every key below
+# has a sensible built-in default in the driver, so the toy still runs if
+# this file is edited or removed.
 
 paths:
   features_wide: "examples/toy/input/toy_features_wide.tsv"
-  feature_map: "examples/toy/input/toy_feature_map.tsv"
-  outdir: "examples/toy/output"
+  feature_map:   "examples/toy/input/toy_feature_map.tsv"
+  outdir:        "examples/toy/output"
 
+# Map the toy's generic column names to the pipeline's internal names.
 columns:
-  id: "eid"
-  age: "age"
-  sex: "sex"
+  id:   "eid"
+  age:  "age"
+  sex:  "sex"
   site: "site"
-  icv: "icv"
+  icv:  "icv"
 
-# Keep modeling intentionally simple for smoke test
-normative_model:
-  method: "gam"
-  k_age: 4
-  include_site_re: false
+# Map the toy's generic modality labels to the CT/SA/SubVol labels that
+# the index code (helpers/compute_mbi.R) recognises and orients.
+modality_map:
+  thickness: "CT"
+  area:      "SA"
+  volume:    "SubVol"
 
+# Modalities for which ICV is included as a normative covariate.
+icv_modalities: ["SA", "SubVol"]
+
+# Synthetic, strictly positive per-region PET weights. The toy has no PET
+# NIfTI to extract from (Stage 01), so these stand in as the metabolic
+# prior. Illustrative only; they carry no biological meaning.
+pet_weights:
+  R01: 1.60
+  R02: 1.10
+  R03: 0.70
+  R04: 0.90
+
+# Index parameters (flagship defaults).
 mbi:
-  weight_cap_fraction: 0.10
-  residualize_against_gbi: true
+  beta: 0.25
+  gamma: 2.5
+  winsor_q: 0.99
+  coverage_thr: 0.80
+  subvol_gate_pct: 0.20
