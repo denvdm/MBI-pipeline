@@ -139,8 +139,16 @@ if (nzchar(train_ids_file) && file.exists(train_ids_file)) {
 # as nuisance covariate for features that need ICV.
 # -----------------------------
 if ("icv_raw" %in% names(dt) && any(is.finite(dt$icv_raw))) {
+  # Guard the scanner random effect: s(scanner, bs = "re") errors out on a
+  # single-level factor (any non-UKB dataset with one site). fit_one_feature()
+  # already guards this; the ICV model did not.
+  icv_frm <- if (length(levels(dt$scanner)) > 1L) {
+    icv_raw ~ s(age, k = 5, bs = "cs") + sex + s(scanner, bs = "re")
+  } else {
+    icv_raw ~ s(age, k = 5, bs = "cs") + sex
+  }
   icv_fit <- mgcv::gam(
-    icv_raw ~ s(age, k = 5, bs = "cs") + sex + s(scanner, bs = "re"),
+    icv_frm,
     data = dt[train_mask, ], method = "REML", na.action = na.exclude
   )
   icv_pred <- predict(icv_fit, newdata = dt, type = "response")
@@ -162,7 +170,13 @@ write.table(dt, file = out_raw, sep = "\t", quote = FALSE, row.names = FALSE)
 # -----------------------------
 # Feature sizes (raw, pre-winsorization)
 # -----------------------------
-feat_mean <- vapply(feature_cols, function(f) mean(dt[[f]], na.rm = TRUE), numeric(1))
+# Computed on the DISCOVERY subset when a split is active. Previously used the
+# full sample, while the manuscript Methods state "mean raw value of region r
+# in the discovery sample" - numerically negligible at this N, but the code
+# should do what the paper says it does.
+feat_mean <- vapply(feature_cols,
+                    function(f) mean(dt[[f]][train_mask], na.rm = TRUE),
+                    numeric(1))
 sizes_df <- fm %>%
   dplyr::mutate(size = as.numeric(feat_mean[feature])) %>%
   dplyr::select(modality, region, size)

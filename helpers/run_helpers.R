@@ -96,14 +96,17 @@ stage_dir <- function(outdir, stage) {
 }
 
 start_logging <- function(logfile) {
+  # BUGFIX: on.exit() inside this function fired when start_logging RETURNED,
+  # closing both sinks immediately - so logging was a no-op for the caller.
+  # (Currently unused in the pipeline, which is why it went unnoticed.)
+  # Returns a closer; caller does: stop_log <- start_logging(f); on.exit(stop_log()).
   con <- file(logfile, open = "wt")
   sink(con, type = "output")
   sink(con, type = "message")
-  on.exit({
+  invisible(function() {
     sink(type = "message"); sink(type = "output")
     close(con)
-  }, add = TRUE)
-  invisible(TRUE)
+  })
 }
 
 parse_common_args <- function(extra_options = list(),

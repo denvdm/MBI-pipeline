@@ -81,11 +81,12 @@ inputs:
 
 mbi:
   beta: 0.25
-  gamma: 2.5
+  map_method: robust_z
+  ratio: 4
+  clamp_z: 2
   alpha: null
-  winsor_q: 0.99
   coverage_thr: 0.80
-  subvol_gate_pct: 0.20
+  subvol_min_mm3: 1000
 
 qc:
   mods_use: ["CT", "SA", "SubVol"]

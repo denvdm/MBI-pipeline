@@ -26,13 +26,17 @@ zs <- fread(normdev_long, data.table = FALSE)
 size_df <- fread(sizes_file, data.table = FALSE)
 fdg <- fread(fdg_file, data.table = FALSE)
 
-# subvol_gate_pct is sourced from cfg$mbi (single source of truth, consumed
+# subvol_min_mm3 is sourced from cfg$mbi (single source of truth, consumed
 # by both stage 03 and this stage so the QC sees the same gate that MBI did).
-mods_use        <- cfg$qc$mods_use         %||% c("CT","SA","SubVol")
-subvol_gate_pct <- cfg$mbi$subvol_gate_pct %||% 0.20
+mods_use       <- cfg$qc$mods_use        %||% c("CT","SA","SubVol")
+subvol_min_mm3 <- cfg$mbi$subvol_min_mm3 %||% 1000
+
+if (!is.null(cfg$mbi$subvol_gate_pct))
+  warning("config: 'subvol_gate_pct' is deprecated and ignored; ",
+          "using absolute 'subvol_min_mm3' = ", subvol_min_mm3, call. = FALSE)
 
 fdg_use <- prep_fdg(fdg)
-zs_gated <- gate_subvol(zs, size_df, pct = subvol_gate_pct)
+zs_gated <- gate_subvol(zs, size_df, min_mm3 = subvol_min_mm3)
 Zc <- collapse_zs(zs_gated, fdg_use, mods_use = mods_use)
 
 mods_tag <- paste(mods_use, collapse = "+")
