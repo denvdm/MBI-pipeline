@@ -137,6 +137,7 @@ normalise_aseg_names <- function(nm) {
   nm <- gsub("^Third_",  "3rd_", nm)
   nm <- gsub("^Fourth_", "4th_", nm)
   nm <- gsub("^Fifth_",  "5th_", nm)
+  nm <- sub("_Thalamus$", "_Thalamus_Proper", nm)
   nm
 }
 names(aseg) <- normalise_aseg_names(names(aseg))
