@@ -6,8 +6,8 @@ authors:
     given-names: "Dennis"
     affiliation: "Centre for Precision Psychiatry, University of Oslo"
     orcid: "0000-0002-0466-386X"   # (optional—add if you want)
-version: "0.1.0"
-date-released: "2025-12-06"
+version: 0.2.0
+date-released: 2026-08-13
 repository-code: "https://github.com/denvdm/MBI-pipeline"
 license: "MIT"
 keywords:
