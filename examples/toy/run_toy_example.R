@@ -77,10 +77,11 @@ mm <- cfg$modality_map %||% list(thickness = "CT", area = "SA", volume = "SubVol
 # index parameters (flagship defaults)
 mb              <- cfg$mbi %||% list()
 beta            <- mb$beta            %||% 0.25
-gamma           <- mb$gamma           %||% 2.5
-winsor_q        <- mb$winsor_q        %||% 0.99
+map_method      <- mb$map_method      %||% "robust_z"
+ratio           <- mb$ratio           %||% 4
+clamp_z         <- mb$clamp_z         %||% 2
 coverage_thr    <- mb$coverage_thr    %||% 0.80
-subvol_gate_pct <- mb$subvol_gate_pct %||% 0.20
+subvol_min_mm3  <- mb$subvol_min_mm3  %||% 0   # toy sizes are synthetic; 0 = keep all
 icv_modalities  <- cfg$icv_modalities %||% c("SA", "SubVol")
 
 # ---- load toy inputs --------------------------------------------------
@@ -168,9 +169,12 @@ weight      <- vapply(regions, function(r) {
 fdg <- data.frame(region = regions, weight = weight, stringsAsFactors = FALSE)
 
 # ---- SubVol size gate (identical logic to scripts/03_run_mbi.R) -------
+# Absolute threshold, matching the main pipeline. The toy default is 0
+# (keep everything): its sizes are synthetic means with no mm^3 meaning,
+# so the production default of 1000 would gate on noise.
 keep_sub <- sizes %>%
   dplyr::filter(modality == "SubVol") %>%
-  dplyr::filter(size >= stats::quantile(size, subvol_gate_pct, na.rm = TRUE)) %>%
+  dplyr::filter(is.finite(size), size >= subvol_min_mm3) %>%
   dplyr::pull(region)
 zs <- zs %>% dplyr::filter(modality != "SubVol" | region %in% keep_sub)
 
@@ -178,8 +182,8 @@ zs <- zs %>% dplyr::filter(modality != "SubVol" | region %in% keep_sub)
 source(file.path(repo_root, "helpers", "compute_mbi.R"))
 res <- compute_flagship_abg(
   zs = zs, fdg = fdg, sizes = sizes,
-  beta = beta, gamma = gamma, alpha = NULL,
-  winsor_q = winsor_q, coverage_thr = coverage_thr
+  beta = beta, map_method = map_method, ratio = ratio, clamp_z = clamp_z,
+  alpha = NULL, coverage_thr = coverage_thr
 )
 scores <- as.data.frame(res$scores)
 
@@ -218,6 +222,9 @@ chk(all(is.finite(scores$mbi)),                            "MBI finite for all s
 chk(abs(mean(scores$mbi)) < 1e-6,                          "MBI mean ~ 0 (standardised)")
 chk(abs(stats::sd(scores$mbi) - 1) < 1e-6,                 "MBI sd ~ 1 (standardised)")
 chk(is.finite(r_mbi_gbi) && abs(r_mbi_gbi) < 1e-6,         "MBI orthogonal to GBI (residualised)")
+chk(all(res$mbi_details$weight_table$w_pet > 0),           "no region zero-weighted in MBI_raw")
+chk(nrow(res$mbi_details$weight_table) ==
+    nrow(res$gbi_details$weight_table),                    "MBI and GBI share one feature set")
 
 cat("\n[toy] outputs written to: ", outdir, "\n", sep = "")
 cat("[toy] R ", as.character(getRversion()), "\n", sep = "")

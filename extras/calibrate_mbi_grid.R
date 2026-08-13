@@ -20,13 +20,32 @@ suppressPackageStartupMessages({
 # ------------------------------------------------------------
 # USER: EDIT HERE (calibration grid)
 # ------------------------------------------------------------
-gammas <- seq(1.0, 4.0, by = 0.25)   # 13 values
+# `ratio` = maximum weight ratio between the highest- and lowest-demand region.
+# It replaces gamma: under the robust_z / rank parameterisation, w^gamma is
+# exactly (ratio^gamma)^(u/2), so exponentiating IS a change of ratio. Swept on
+# a roughly geometric grid because the parameter is multiplicative.
+ratios <- c(1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 13, 16, 20, 26)
 betas  <- seq(0.0, 0.5, by = 0.05)   # 11 values
 
-# Modalities used for the r_tilt target (alignment of deviations with PET weights)
-mods_use <- c("CT", "SA")
+# Constraints applied when reporting the recommended cell (see bottom of file).
+# n_eff  : effective number of features carrying the index (concentration).
+# r2 band: MBI_raw vs GBI shared variance. Too LOW and the two weightings barely
+#          differ, so the residual is noise; too HIGH and MBI is a rescaling of
+#          GBI. This bounds `ratio` from both sides and makes the choice
+#          well-posed rather than a preference.
+n_eff_min <- 30
+r2_band   <- c(0.75, 0.95)
 
-# SubVol size gate (passed through; the actual gate value comes from config)
+# Modalities used for the r_tilt target (alignment of deviations with PET weights)
+#
+# !! CHANGED from c("CT","SA") to all three modalities.
+# !! The calibration target was previously computed on CORTEX ONLY, while the
+# !! index it is tuned against is overwhelmingly subcortical (SubVol carries
+# !! r = 0.46 with MBI; CT = 0.03, SA = 0.01). gamma and beta were therefore
+# !! selected to maximise agreement between a subcortically-driven index and a
+# !! cortex-only alignment target - which is part of why mbi_map_r ceilings
+# !! around 0.55. The target must span the same features as the index.
+mods_use <- c("CT", "SA", "SubVol")
 # ------------------------------------------------------------
 
 source("helpers/run_helpers.R")
@@ -42,9 +61,16 @@ stage_dir_local <- function(outdir, stage) {
   d
 }
 
-subvol_gate_pct <- cfg$mbi$subvol_gate_pct %||% 0.20
-winsor_q        <- cfg$mbi$winsor_q        %||% 0.99
-coverage_thr    <- cfg$mbi$coverage_thr    %||% 0.80
+subvol_min_mm3 <- cfg$mbi$subvol_min_mm3 %||% 1000
+map_method     <- cfg$mbi$map_method     %||% "robust_z"
+clamp_z        <- cfg$mbi$clamp_z        %||% 2
+coverage_thr   <- cfg$mbi$coverage_thr   %||% 0.80
+gamma          <- cfg$mbi$gamma          %||% 2.5   # legacy path only
+winsor_q       <- cfg$mbi$winsor_q       %||% 0.99  # legacy path only
+
+if (!is.null(cfg$mbi$subvol_gate_pct))
+  warning("config: 'subvol_gate_pct' is deprecated and ignored; ",
+          "using absolute 'subvol_min_mm3' = ", subvol_min_mm3, call. = FALSE)
 
 normdev_dir <- file.path(opt$outdir, "normdev")
 pet_dir     <- file.path(opt$outdir, "extract_pet")
@@ -85,12 +111,12 @@ fdg_use <- if ("weight" %in% names(fdg)) {
 }
 
 # -----------------------------
-# SubVol gating (matches main pipeline). Two-step filter so quantile()
-# is computed within SubVol only.
+# SubVol gating (matches main pipeline): ABSOLUTE volume threshold, so this
+# gate and align_feature_set() commute and the order never has to be defended.
 # -----------------------------
 keep_sub <- size_df %>%
   filter(modality == "SubVol") %>%
-  filter(is.finite(size), size >= quantile(size, subvol_gate_pct, na.rm = TRUE)) %>%
+  filter(is.finite(size), size >= subvol_min_mm3) %>%
   pull(region)
 
 zs <- zs %>% filter(modality != "SubVol" | region %in% keep_sub)
@@ -116,19 +142,21 @@ r_tilt_df <- zo %>%
 # -----------------------------
 # Grid evaluation
 # -----------------------------
-grid <- expand.grid(gamma = gammas, beta = betas,
+grid <- expand.grid(ratio = ratios, beta = betas,
                     KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
-cat(sprintf("[INFO] Sweeping %d cells (gamma: %.2f-%.2f, beta: %.2f-%.2f)\n",
-            nrow(grid), min(gammas), max(gammas), min(betas), max(betas)))
+cat(sprintf("[INFO] Sweeping %d cells (method: %s, ratio: %.2f-%.2f, beta: %.2f-%.2f)\n",
+            nrow(grid), map_method, min(ratios), max(ratios), min(betas), max(betas)))
 
-eval_one <- function(g, b) {
-  res <- compute_flagship_abg(
+eval_one <- function(R, b) {
+  # suppressMessages: align_feature_set() and compute_flagship_abg() report per
+  # call, which is useful once and unreadable across a full sweep.
+  res <- suppressMessages(compute_flagship_abg(
     zs = zs, fdg = fdg_use %>% rename(weight = w_pet), sizes = size_df,
-    beta = b, gamma = g,
+    beta = b, map_method = map_method, ratio = R, clamp_z = clamp_z,
     alpha = cfg$mbi$alpha %||% NULL,
-    winsor_q     = winsor_q,
-    coverage_thr = coverage_thr
-  )
+    coverage_thr = coverage_thr,
+    gamma = gamma, winsor_q = winsor_q
+  ))
   scores <- as.data.frame(res$scores)
 
   corr_unw_pet <- suppressWarnings(cor(scores$gbi, scores$mbi_raw, use = "pairwise.complete.obs"))
@@ -136,12 +164,23 @@ eval_one <- function(g, b) {
   tmp <- inner_join(scores[, c("id", "mbi")], r_tilt_df, by = "id")
   mbi_map_r <- suppressWarnings(cor(tmp$mbi, tmp$r_tilt, use = "pairwise.complete.obs"))
 
-  data.frame(gamma = g, beta = b, corr_unw_pet = corr_unw_pet, mbi_map_r = mbi_map_r)
+  # Three numbers, three failure modes:
+  #   mbi_map_r : does the index track the map alignment it claims to?
+  #   n_eff     : or is it buying that alignment from a handful of regions?
+  #   r2_raw_gbi: is there enough contrast left for the residual to be signal?
+  data.frame(ratio = R, beta = b,
+             corr_unw_pet   = corr_unw_pet,
+             r2_raw_gbi     = corr_unw_pet^2,
+             mbi_map_r      = mbi_map_r,
+             n_eff          = res$concentration$n_eff,
+             n_features     = res$concentration$n_features,
+             top_share      = max(res$concentration$shares$share),
+             realised_ratio = res$diagnostics$realised_ratio)
 }
 
 evals <- do.call(rbind, lapply(seq_len(nrow(grid)), function(i) {
   if (i %% 20 == 0) cat(sprintf("  ... cell %d/%d\n", i, nrow(grid)))
-  eval_one(grid$gamma[i], grid$beta[i])
+  eval_one(grid$ratio[i], grid$beta[i])
 }))
 tab <- evals %>% arrange(desc(mbi_map_r))
 
@@ -150,7 +189,29 @@ write.table(tab, file = out_file, sep = "\t",
             row.names = FALSE, quote = FALSE)
 
 cat("[OK] Wrote: ", out_file, "\n", sep = "")
-cat("[OK] Best row (by mbi_map_r):\n")
+cat("[OK] Best row by mbi_map_r, UNCONSTRAINED (do not adopt blindly):\n")
 print(tab[1, , drop = FALSE])
-cat("[OK] Current settings (gamma=2.5, beta=0.25):\n")
-print(tab[tab$gamma == 2.5 & tab$beta == 0.25, , drop = FALSE])
+
+feasible <- tab[is.finite(tab$n_eff) & tab$n_eff >= n_eff_min &
+                is.finite(tab$r2_raw_gbi) &
+                tab$r2_raw_gbi >= r2_band[1] & tab$r2_raw_gbi <= r2_band[2], ,
+                drop = FALSE]
+
+cat(sprintf("[OK] RECOMMENDED: best mbi_map_r subject to n_eff >= %d and R2(raw,GBI) in [%.2f, %.2f]:\n",
+            n_eff_min, r2_band[1], r2_band[2]))
+if (nrow(feasible)) {
+  print(feasible[1, , drop = FALSE])
+} else {
+  cat("     NONE - no cell satisfies both constraints.\n")
+  cat("     Widen the ratio grid, relax n_eff_min, or reconsider beta:\n")
+  cat(sprintf("     best n_eff anywhere = %.2f; R2 range = [%.3f, %.3f]\n",
+              max(tab$n_eff, na.rm = TRUE),
+              min(tab$r2_raw_gbi, na.rm = TRUE), max(tab$r2_raw_gbi, na.rm = TRUE)))
+}
+
+cat("[OK] Concentration frontier (best mbi_map_r at each n_eff decile):\n")
+tab$n_eff_bin <- cut(tab$n_eff, breaks = quantile(tab$n_eff, seq(0, 1, 0.1), na.rm = TRUE),
+                     include.lowest = TRUE, labels = FALSE)
+frontier <- do.call(rbind, lapply(split(tab, tab$n_eff_bin), function(d)
+  d[which.max(d$mbi_map_r), c("ratio","beta","mbi_map_r","n_eff","r2_raw_gbi","top_share")]))
+print(frontier, row.names = FALSE)

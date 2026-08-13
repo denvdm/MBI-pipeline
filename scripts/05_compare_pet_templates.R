@@ -31,6 +31,7 @@ extra <- list(
 opt <- parse_common_args(extra_options = extra)
 cfg <- read_config(opt$config)
 
+source_local("compute_mbi.R")        # defines transform_map_weights(), aliased below
 source_local("compare_pet_funcs.R")
 
 if (is.null(opt$canonical_outdir) || !nzchar(opt$canonical_outdir)) {
@@ -55,11 +56,15 @@ w_alt   <- fread(alt_weights,   data.table = FALSE)
 s_canon <- fread(canon_scores,  data.table = FALSE)
 s_alt   <- fread(alt_scores,    data.table = FALSE)
 
-gamma    <- cfg$mbi$gamma    %||% 2.5
-winsor_q <- cfg$mbi$winsor_q %||% 0.99
+map_method <- cfg$mbi$map_method %||% "robust_z"
+ratio      <- cfg$mbi$ratio      %||% 4
+clamp_z    <- cfg$mbi$clamp_z    %||% 2
+gamma      <- cfg$mbi$gamma      %||% 2.5      # legacy path only
+winsor_q   <- cfg$mbi$winsor_q   %||% 0.99     # legacy path only
 
 # Tier 0: weight-vector regional correlation
 W <- compare_weights_regional(w_canon, w_alt,
+                              method = map_method, ratio = ratio, clamp_z = clamp_z,
                               gamma = gamma, winsor_q = winsor_q,
                               drop_ventricles = TRUE)
 write.table(W$summary,
@@ -81,9 +86,10 @@ fwrite(S$subject,
 # Run-level metadata for downstream provenance
 meta <- data.frame(
   field = c("template_label", "canonical_outdir", "alt_outdir",
-            "gamma", "winsor_q",
+            "map_method", "ratio", "clamp_z", "gamma", "winsor_q",
             "n_regions_compared", "n_subjects_compared", "timestamp"),
   value = c(opt$template_label, opt$canonical_outdir, alt_outdir,
+            map_method, as.character(ratio), as.character(clamp_z),
             as.character(gamma), as.character(winsor_q),
             as.character(nrow(W$regional)), as.character(nrow(S$subject)),
             format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"))

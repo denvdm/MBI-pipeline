@@ -10,6 +10,8 @@
 # main pipeline (which excludes ventricles upstream at prep_features.R).
 # Pass drop_ventricles = FALSE to keep them, e.g. for a template-level
 # sanity check on PVE handling.
+#
+# REQUIRES compute_mbi.R to be sourced first (for transform_map_weights()).
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -28,27 +30,24 @@ fisher_ci <- function(r, n, conf = 0.95) {
   c(lo = tanh(z - zc * se), hi = tanh(z + zc * se))
 }
 
-# Apply the pipeline's PET-weight transform: clamp/winsor/normalize/exponentiate.
-# Mirrors compute_mbi.R::compute_mbi_flagship() so the comparison reflects what
-# actually enters MBI rather than just the raw map.
-apply_pet_transform <- function(w, gamma = 2.5, winsor_q = 0.99) {
-  w[!is.finite(w) | w <= 0] <- 0
-  # winsor positives at p99 BEFORE mean-norm (same order as compute_mbi.R)
-  if (!is.null(winsor_q) && is.finite(winsor_q) && winsor_q > 0 && winsor_q < 1) {
-    pos <- w[w > 0]
-    if (length(pos) > 1) {
-      qhi <- as.numeric(quantile(pos, winsor_q, na.rm = TRUE))
-      w <- pmin(w, qhi)
-    }
-  }
-  m <- mean(w[w > 0], na.rm = TRUE)
-  if (is.finite(m) && m > 0) w <- w / m
-  if (!is.null(gamma) && is.finite(gamma) && gamma != 1) w <- w ^ gamma
-  w
+# The PET-weight transform is defined ONCE, in compute_mbi.R. This file used to
+# carry its own copy with a comment saying it "mirrors" the index - two code
+# paths that must agree, with nothing enforcing it. Aliasing means any change to
+# the transform reaches the cross-template comparison automatically, so SF3 can
+# never silently validate a construction the index no longer uses.
+if (!exists("transform_map_weights", mode = "function")) {
+  stop("compare_pet_funcs.R requires compute_mbi.R to be sourced first ",
+       "(transform_map_weights() not found).", call. = FALSE)
+}
+apply_pet_transform <- function(w, method = "robust_z", ratio = 4, clamp_z = 2,
+                                gamma = 2.5, winsor_q = 0.99) {
+  transform_map_weights(w, method = method, ratio = ratio, clamp_z = clamp_z,
+                        gamma = gamma, winsor_q = winsor_q, global_norm = TRUE)
 }
 
 # Tier 0: regional weight-vector comparison
 compare_weights_regional <- function(w_canon_df, w_alt_df,
+                                     method = "robust_z", ratio = 4, clamp_z = 2,
                                      gamma = 2.5, winsor_q = 0.99,
                                      drop_ventricles = TRUE) {
   stopifnot(all(c("region", "weight") %in% names(w_canon_df)))
@@ -61,14 +60,19 @@ compare_weights_regional <- function(w_canon_df, w_alt_df,
   )
 
   # Lock the comparison to regions where BOTH templates have valid data.
-  d <- d[is.finite(d$w_canon) & is.finite(d$w_alt), , drop = FALSE]
+  # Matches align_feature_set(): finite AND positive, not merely finite.
+  d <- d[is.finite(d$w_canon) & is.finite(d$w_alt) &
+         d$w_canon > 0 & d$w_alt > 0, , drop = FALSE]
 
   if (isTRUE(drop_ventricles)) {
     d <- d[!grepl(VENT_PAT, d$region, perl = TRUE), , drop = FALSE]
   }
 
-  d$w_canon_g <- apply_pet_transform(d$w_canon, gamma, winsor_q)
-  d$w_alt_g   <- apply_pet_transform(d$w_alt,   gamma, winsor_q)
+  # Each template is transformed on ITS OWN robust statistics, which is the
+  # point of the comparison: agreement should reflect shared topography, not a
+  # shared arbitrary scale imposed from outside.
+  d$w_canon_g <- apply_pet_transform(d$w_canon, method, ratio, clamp_z, gamma, winsor_q)
+  d$w_alt_g   <- apply_pet_transform(d$w_alt,   method, ratio, clamp_z, gamma, winsor_q)
 
   metrics <- function(x, y, label) {
     ok <- is.finite(x) & is.finite(y)
@@ -91,7 +95,10 @@ compare_weights_regional <- function(w_canon_df, w_alt_df,
     )
   }
 
-  tag <- sprintf("after_gamma%.2f_winsorq%.2f", gamma, winsor_q)
+  tag <- if (identical(method, "legacy"))
+    sprintf("after_legacy_gamma%.2f_winsorq%.2f", gamma, winsor_q)
+  else
+    sprintf("after_%s_ratio%.2f", method, ratio)
   out <- bind_rows(
     metrics(d$w_canon,   d$w_alt,   "raw_normalised"),
     metrics(d$w_canon_g, d$w_alt_g, tag)

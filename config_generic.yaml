@@ -60,12 +60,21 @@ runtime:
   n_cores: 12
 
 mbi:
-  beta: 0.25
-  gamma: 2.5
+  beta: 0.25              # size weighting exponent (size^beta); a concentration lever alongside `ratio`
+  map_method: robust_z    # robust_z | rank | legacy. robust_z keeps relative magnitude on a median/MAD
+                          # scale (comparable across biological maps); rank uses topography only;
+                          # legacy reproduces the pre-rebuild z-score/min-shift/^gamma construction.
+  ratio: 4                # MAX weight ratio, highest- vs lowest-demand region. Replaces gamma:
+                          # w^gamma == (ratio^gamma)^(u/2), so exponentiating IS a change of ratio.
+                          # Select on the calibration grid, not by hand.
+  clamp_z: 2              # robust_z only: clamp at +/- this many robust SDs so no outlier parcel
+                          # can stretch the weight range
   alpha: null
-  winsor_q: 0.99          # winsorise FDG-PET weights at this quantile of positives before ^gamma
   coverage_thr: 0.80
-  subvol_gate_pct: 0.20   # drop the smallest p<gate> of SubVol regions; single source of truth (consumed by both stage 03 and 04)
+  # gamma / winsor_q apply ONLY when map_method: legacy
+  # gamma: 2.5
+  # winsor_q: 0.99
+  subvol_min_mm3: 1000    # drop SubVol structures below this volume (mm^3); single source of truth (stages 03, 04, calibration). Absolute, not a quantile: invariant to upstream region filtering.
 
 qc:
   mods_use: ["CT", "SA", "SubVol"]

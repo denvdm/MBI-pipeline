@@ -30,8 +30,12 @@ dt <- fread(feats_file, select = c("id", "sex", "age"))
 dt <- dt[complete.cases(dt)]
 
 # stratify by sex x age decile
-dt[, age_dec := cut(age, breaks = quantile(age, probs = seq(0, 1, 0.1), na.rm = TRUE),
-                    include.lowest = TRUE, labels = FALSE)]
+# unique(): with integer ages, decile breaks can coincide and cut() errors on
+# duplicated breaks. Deduplicating merges the affected strata, which is the
+# sane degradation.
+brks <- unique(quantile(dt$age, probs = seq(0, 1, 0.1), na.rm = TRUE))
+if (length(brks) < 2L) stop("age has no spread; cannot stratify")
+dt[, age_dec := cut(age, breaks = brks, include.lowest = TRUE, labels = FALSE)]
 dt[, stratum := paste0(sex, "_", age_dec)]
 
 set.seed(seed)

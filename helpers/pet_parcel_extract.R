@@ -40,9 +40,17 @@ pet_parcel_extract <- function(pet, atlas, gm_prob=NULL,
   # --- clamp/winsor
   if (isTRUE(clamp_neg)) pet_arr[pet_arr < 0] <- 0
   if (!is.null(winsor_q)) {
-    x <- pet_arr[gm_mask]
-    ql <- as.numeric(stats::quantile(x, probs=winsor_q, na.rm=TRUE, names=FALSE))
-    qh <- as.numeric(stats::quantile(x, probs=1-winsor_q, na.rm=TRUE, names=FALSE))
+    # BUGFIX: bounds were swapped for winsor_q > 0.5. With winsor_q = 0.99 the
+    # old code used the 99th percentile as the LOWER bound and the 1st as the
+    # UPPER, collapsing the image into nonsense. Inactive in the flagship run
+    # (winsor_q = NULL), but the rest of the pipeline uses the 0.99 convention,
+    # so enabling it here would have triggered the trap. Accept either
+    # convention explicitly.
+    x   <- pet_arr[gm_mask]
+    plo <- min(winsor_q, 1 - winsor_q)
+    phi <- max(winsor_q, 1 - winsor_q)
+    ql  <- as.numeric(stats::quantile(x, probs=plo, na.rm=TRUE, names=FALSE))
+    qh  <- as.numeric(stats::quantile(x, probs=phi, na.rm=TRUE, names=FALSE))
     pet_arr[pet_arr < ql] <- ql; pet_arr[pet_arr > qh] <- qh
   }
 

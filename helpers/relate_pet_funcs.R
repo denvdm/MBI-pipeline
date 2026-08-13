@@ -20,14 +20,27 @@ pick_z_col <- function(zs) {
 }
 
 prep_fdg <- function(fdg) {
-  if ("w_pet" %in% names(fdg)) {
+  out <- if ("w_pet" %in% names(fdg)) {
     fdg %>% dplyr::select(region, w_pet)
   } else if ("weight" %in% names(fdg)) {
     fdg %>% dplyr::transmute(region, w_pet = weight)
   } else {
     stop("fdg must have column 'w_pet' or 'weight'")
   }
+  # Match align_feature_set() in compute_mbi.R: a region without a finite,
+  # positive map weight does not enter the index, so it must not enter the
+  # QC that is meant to describe the index either.
+  out %>%
+    dplyr::mutate(region = as.character(region),
+                  w_pet  = as.numeric(w_pet)) %>%
+    dplyr::filter(is.finite(w_pet), w_pet > 0)
 }
+
+# NOTE: w_pet here is the RAW map value, not the winsorised/normalised/^gamma
+# vector that enters the index. Spearman correlations are unaffected (monotone
+# transform); reported Pearson values describe alignment with the biological
+# map itself rather than with the transformed weights. Intentional, but state
+# it wherever these numbers are reported.
 
 # --- Fisher z CIs -------------------------------------------------------------
 
@@ -57,12 +70,16 @@ fisher_mean_ci <- function(r_vec, n_vec, conf = 0.95) {
 
 # --- SubVol gate + collapse to (id,region) once ------------------------------
 
-gate_subvol <- function(zs, size_df, pct = 0.20) {
-  # Two-step filter so quantile() is computed within SubVol only,
-  # not over the full size_df (which would mix CT/SA/SubVol scales).
+gate_subvol <- function(zs, size_df, min_mm3 = 1000) {
+  # ABSOLUTE volume threshold, replacing the previous within-SubVol quantile.
+  # The quantile version was recomputed over whatever SubVol set survived
+  # upstream filtering, so dropping a region for unrelated reasons silently
+  # shifted which OTHER structures were gated out. An absolute cut is invariant
+  # to that, and keeps this QC stage gated identically to stage 03 regardless
+  # of the order in which filters are applied.
   keep_sub <- size_df %>%
     dplyr::filter(modality == "SubVol") %>%
-    dplyr::filter(size >= quantile(size, pct, na.rm = TRUE)) %>%
+    dplyr::filter(is.finite(size), size >= min_mm3) %>%
     dplyr::pull(region)
 
   zs %>%

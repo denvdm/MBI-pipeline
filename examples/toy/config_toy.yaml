@@ -43,7 +43,8 @@ pet_weights:
 # Index parameters (flagship defaults).
 mbi:
   beta: 0.25
-  gamma: 2.5
-  winsor_q: 0.99
+  map_method: robust_z
+  ratio: 4
+  clamp_z: 2
   coverage_thr: 0.80
-  subvol_gate_pct: 0.20
+  subvol_min_mm3: 0     # synthetic sizes; keep all structures
