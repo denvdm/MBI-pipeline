@@ -95,20 +95,22 @@ echo "[DONE] All steps finished. Outputs in: $OUTDIR"
 
 
 # ------------------------------------------------------------
-# OPTIONAL: MBI calibration (EXTRAS)
+# OPTIONAL: parameter sensitivity strip (EXTRAS)
 # ------------------------------------------------------------
-# This step performs a grid search over (gamma, beta) to
-# calibrate the MBI weighting. It is NOT required for normal
-# pipeline runs and is therefore not executed by default.
+# Reports how the index behaves across emphasis (the only
+# parameter that changes MBI) and beta. This is a sensitivity
+# report, NOT a selection step: fix the parameters first and
+# record them in extras/SELECTION_RULE.md, then run this to show
+# the result does not hinge on them. Not executed by default.
 #
 # To run manually after the pipeline completes:
 #
-#   Rscript extras/calibrate_mbi_grid.R \
+#   Rscript extras/sweep_emphasis.R \
 #     --config ${CFG} \
 #     --outdir ${OUTDIR}
 #
 # Results will be written to:
-#   ${OUTDIR}/calibration/calibration_grid_results.tsv
+#   ${OUTDIR}/calibration/sweep_emphasis_results.tsv
 # ------------------------------------------------------------
 
 # ------------------------------------------------------------

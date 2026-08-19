@@ -2,7 +2,7 @@
 # Stage 05: Compare alt PET-template MBI outputs vs the canonical run.
 #
 # Tier 0: weight-vector regional correlation (PET weights, raw + after the
-#         pipeline's gamma + p99-winsor transform).
+#         pipeline's map-weight transform).
 # Tier 1: subject-level construct correlations (MBI_raw, GBI, MBI).
 #
 # Workflow:
@@ -56,29 +56,23 @@ w_alt   <- fread(alt_weights,   data.table = FALSE)
 s_canon <- fread(canon_scores,  data.table = FALSE)
 s_alt   <- fread(alt_scores,    data.table = FALSE)
 
-map_method <- cfg$mbi$map_method %||% "robust_z"
-ratio      <- cfg$mbi$ratio      %||% 4
-clamp_z    <- cfg$mbi$clamp_z    %||% 2
-gamma      <- cfg$mbi$gamma      %||% 2.5      # legacy path only
-winsor_q   <- cfg$mbi$winsor_q   %||% 0.99     # legacy path only
+# Resolve once from the CANONICAL map so both templates are transformed on
+# the same weight scale; otherwise each would self-scale and the Tier 0
+# comparison would silently be between two differently-scaled vectors.
+ratio    <- resolve_ratio(w_canon$weight, cfg$mbi$ratio %||% "auto")
+clamp_z  <- cfg$mbi$clamp_z  %||% 3
+emphasis <- cfg$mbi$emphasis %||% 1
 
 # Tier 0: weight-vector regional correlation
 W <- compare_weights_regional(w_canon, w_alt,
-                              method = map_method, ratio = ratio, clamp_z = clamp_z,
-                              gamma = gamma, winsor_q = winsor_q,
+                              ratio = ratio, clamp_z = clamp_z, emphasis = emphasis,
                               drop_ventricles = TRUE)
-write.table(W$summary,
-            file = file.path(out_stage, "weight_vector_correlations.tsv"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
-write.table(W$regional,
-            file = file.path(out_stage, "weight_vector_regional.tsv"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+write_tsv(W$summary,  file.path(out_stage, "weight_vector_correlations.tsv"))
+write_tsv(W$regional, file.path(out_stage, "weight_vector_regional.tsv"))
 
 # Tier 1: subject-level construct correlation
 S <- compare_scores_subject(s_canon, s_alt)
-write.table(S$summary,
-            file = file.path(out_stage, "subject_level_correlations.tsv"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+write_tsv(S$summary, file.path(out_stage, "subject_level_correlations.tsv"))
 fwrite(S$subject,
        file = file.path(out_stage, "subject_level_scores.tsv.gz"),
        sep = "\t", compress = "gzip")
@@ -86,16 +80,20 @@ fwrite(S$subject,
 # Run-level metadata for downstream provenance
 meta <- data.frame(
   field = c("template_label", "canonical_outdir", "alt_outdir",
-            "map_method", "ratio", "clamp_z", "gamma", "winsor_q",
+            "ratio", "clamp_z", "emphasis",
             "n_regions_compared", "n_subjects_compared", "timestamp"),
   value = c(opt$template_label, opt$canonical_outdir, alt_outdir,
-            map_method, as.character(ratio), as.character(clamp_z),
-            as.character(gamma), as.character(winsor_q),
+            as.character(ratio), as.character(clamp_z), as.character(emphasis),
             as.character(nrow(W$regional)), as.character(nrow(S$subject)),
             format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"))
 )
-write.table(meta, file = file.path(out_stage, "compare_meta.tsv"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+write_tsv(meta, file.path(out_stage, "compare_meta.tsv"))
+
+write_run_info(out_stage, "05_compare_pet_templates", opt$config, params = list(
+  template_label = opt$template_label, canonical_outdir = opt$canonical_outdir,
+  ratio = ratio, clamp_z = clamp_z, emphasis = emphasis,
+  n_regions_compared = nrow(W$regional), n_subjects_compared = nrow(S$subject)
+))
 
 cat("\n==== Tier 0: PET weight-vector regional correlation ====\n")
 cat("Template:", opt$template_label, "vs canonical\n\n")

@@ -23,13 +23,13 @@ set -euo pipefail
 # User edit section
 # ------------------------------------------------------------
 # Root of this repo (where helpers/prep_fsaverage_to_pet.py lives)
-PROJECT_ROOT="${PROJECT_ROOT:-$PWD}" #/ess/p33/cluster/ukbio_users/dennisva/mbi-pipeline
+PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
 
 # Where raw PET .nii.gz inputs live
-PET_DIR="${PET_DIR:-/path/to/pet_raw}" #/ess/p33/cluster/ukbio_users/dennisva/mbi_ukb/neuromaps
+PET_DIR="${PET_DIR:-/path/to/pet_raw}"
 
 # Where MRI template inputs (MNI152, GM probability) live
-MAPS_DIR="${MAPS_DIR:-/path/to/templates}" #/ess/p33/cluster/ukbio_users/dennisva/mbi_ukb/neuromaps
+MAPS_DIR="${MAPS_DIR:-/path/to/templates}"
 
 # FreeSurfer fsaverage directory (set FREESURFER_HOME or set FSAVG_DIR directly)
 FREESURFER_HOME="${FREESURFER_HOME:-/path/to/freesurfer}" #/cluster/software/EL9/amd/zen/easybuild/software/FreeSurfer/5.3.0-centos6_x86_64

@@ -48,10 +48,37 @@ inputs:
   # pet_weights: "/path/to/pet/pet_fdg_featMedians.txt"
   # feat_sizes: "/path/to/normdev/feats_avgSize.txt"
 
+  # Optional: per-feature test-retest ICC table (columns: modality, region, icc).
+  # Activates the ICC gate in stage 03 together with mbi.icc_min.
+  # feat_icc: "/path/to/feature_icc.tsv"
+
 normative:
   k_age: 10
   use_site_RE: true
   sex_interact: false
+
+  variance_model: true    # LOCATION-SCALE normative model (mgcv gaulss): fit
+                          # sigma(age, sex, scanner) as well as the mean, so
+                          # every subject is z-scored against their own expected
+                          # spread. With one scalar sigma per feature instead,
+                          # |z| is inflated at the ages where that feature is
+                          # more variable — on simulated data with an
+                          # age-increasing SD, sd(z) of 0.70 / 0.95 / 1.27 across
+                          # age tertiles, versus 1.00 / 0.99 / 1.01 under gaulss.
+                          # This matters more for MBI than for a mean index:
+                          # MBI is a spatial CONTRAST, so where the
+                          # variance-by-age slope differs between regions the
+                          # inflation is spatially patterned, and spatially
+                          # patterned inflation of z is indistinguishable from
+                          # genuine deviation topography.
+                          # false = location-only fit; a diagnostic comparison,
+                          # not an alternative specification.
+
+  k_age_scale: 5          # basis dimension for the age smooth in the VARIANCE
+                          # model. Deliberately smaller than k_age: a variance
+                          # curve does not support 10 basis functions at this N,
+                          # and over-flexible scale models are the usual cause of
+                          # gaulss convergence failures.
 
   # Modalities that should include ICV as a covariate if icv is available
   icv_modalities: ["SA", "SubVol"]
@@ -59,22 +86,106 @@ normative:
 runtime:
   n_cores: 12
 
+outputs:
+  write_raw_values: false   # feats_rawVals.txt is a verbatim copy of the input
+                            # feature table and the largest file stage 02 can
+                            # produce. Nothing in this pipeline reads it. Set
+                            # true if something downstream of yours does; the
+                            # skip is announced in the stage log either way.
+
 mbi:
-  beta: 0.25              # size weighting exponent (size^beta); a concentration lever alongside `ratio`
-  map_method: robust_z    # robust_z | rank | legacy. robust_z keeps relative magnitude on a median/MAD
-                          # scale (comparable across biological maps); rank uses topography only;
-                          # legacy reproduces the pre-rebuild z-score/min-shift/^gamma construction.
-  ratio: 4                # MAX weight ratio, highest- vs lowest-demand region. Replaces gamma:
-                          # w^gamma == (ratio^gamma)^(u/2), so exponentiating IS a change of ratio.
-                          # Select on the calibration grid, not by hand.
-  clamp_z: 2              # robust_z only: clamp at +/- this many robust SDs so no outlier parcel
-                          # can stretch the weight range
-  alpha: null
-  coverage_thr: 0.80
-  # gamma / winsor_q apply ONLY when map_method: legacy
-  # gamma: 2.5
-  # winsor_q: 0.99
-  subvol_min_mm3: 1000    # drop SubVol structures below this volume (mm^3); single source of truth (stages 03, 04, calibration). Absolute, not a quantile: invariant to upstream region filtering.
+  # Seven keys, listed below. Weights are pooled globally over all features and
+  # the map -> weight transform is additive; neither is configurable, and stage
+  # 03 warns if the config carries keys it does not read.
+
+  emphasis: 1             # THE ONLY PARAMETER THAT CHANGES MBI.
+                          # u -> sign(u)*|u|^emphasis, applied before the weight
+                          # mapping. At 1 the transform is off and the weights
+                          # are affine in the map's robust z, so MBI is a plain
+                          # linear contrast along the biological gradient.
+                          #
+                          # WHY 1 IS THE DEFAULT. At emphasis = 1 the index has
+                          # NO free parameters at all: ratio is algebraically
+                          # inert, clamp_z is a rail, beta is 0. There is
+                          # nothing left that a reader could suspect of having
+                          # been tuned. It is also the least concentrated
+                          # setting, which matters because concentration is the
+                          # failure mode this construction is most exposed to.
+                          #
+                          # Above 1, since |u| <= 1, the transform shrinks
+                          # typical-demand regions toward the mean weight while
+                          # leaving both extremes at +/-1: convex, sign-symmetric
+                          # emphasis on the tails, encoding a hypothesis that
+                          # demand relates non-linearly to vulnerability. It
+                          # buys that hypothesis at a real cost in concentration
+                          # -- on the reference cohort, N_eff fell from 43.8 at
+                          # emphasis 1 to 20.6 at 2 and 12.4 at 3, while the
+                          # largest single feature share rose from 5.3% to 11.8%
+                          # to 19.4%. Raise it only with a stated reason.
+                          # SENSITIVITY TO REPORT: emphasis in {1, 2, 3}.
+
+  clamp_z: 3              # clamp the robust-z of the map at +/- this many robust
+                          # SDs so no outlier parcel can stretch the weight range.
+                          # Intended as a safety rail, not a design parameter:
+                          # check the realised weight ratio reported by stage 03,
+                          # and prefer a value at which nothing on your map
+                          # reaches the bound. A clamp that engages on one tail
+                          # only is a one-sided distortion of the weights.
+
+  ratio: auto             # nominal max:min of the weight vector. ALGEBRAICALLY
+                          # INERT for MBI: residualising on GBI removes the term
+                          # it scales, and it cancels in the influence shares, so
+                          # it cannot be tuned to change a result — see
+                          # extras/verify_invariance.R.
+                          # "auto" reads it off the supplied map, so the weights
+                          # span the same multiplicative range the biology does
+                          # and there is no number here to maintain. A hard-coded
+                          # value would have to be re-derived by hand whenever the
+                          # map changed, and would go stale silently if nobody
+                          # did. A literal number is accepted, and is what
+                          # verify_invariance.R uses to sweep the parameter.
+                          # Stage 03 reports both the resolved value and the
+                          # REALISED contrast, which is lower whenever the clamp
+                          # does not engage on both tails.
+
+  beta: 0                 # size weighting exponent on tissue volume (mm^3).
+                          # 0: every standardised regional deviation is one
+                          # observation of the spatial pattern — a topography
+                          # question. 1: volume weighting, which is
+                          # parcellation-invariant but answers a burden question
+                          # and concentrates influence on large structures.
+                          # SENSITIVITY TO REPORT: beta in {0, 1}.
+
+  coverage_thr: 0.80      # per-(subject, modality) completeness required for a
+                          # subject to contribute that modality.
+
+  required_modalities: ["CT", "SA", "SubVol"]
+                          # Modalities a subject must contribute to receive a
+                          # score at all. coverage_thr decides whether a subject
+                          # contributes a GIVEN modality; it does not decide
+                          # whether they have enough modalities for the index to
+                          # mean the same thing. Because MBI is a contrast, a
+                          # subject scored on CT+SA only carries a DIFFERENT
+                          # linear functional, not a noisier estimate of the same
+                          # one - on simulated data, r = 0.92 against the full
+                          # index when SubVol is missing and r = 0.77 when CT is.
+                          # null scores everyone who clears coverage_thr on at
+                          # least one modality; stage 03 then warns.
+
+  subvol_min_mm3: 1000    # drop SubVol structures below this volume (mm^3);
+                          # single source of truth for stages 03, 04 and the
+                          # sweep. Absolute, not a quantile: invariant to
+                          # upstream region filtering, so this gate and the
+                          # map-validity filter in align_feature_set() commute.
+                          # Set it from your own segmentation's volume
+                          # distribution.
+
+  # Optional: per-feature test-retest ICC gate across ALL modalities, for
+  # cohorts with a repeat-imaging visit. A direct reliability measure, and a
+  # better instrument than using size as a proxy for it. BOTH keys are required
+  # to activate it -- inputs.feat_icc (a table with columns modality, region,
+  # icc) and mbi.icc_min.
+  # icc_min: 0.70
 
 qc:
   mods_use: ["CT", "SA", "SubVol"]

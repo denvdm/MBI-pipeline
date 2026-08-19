@@ -40,12 +40,10 @@ pet_parcel_extract <- function(pet, atlas, gm_prob=NULL,
   # --- clamp/winsor
   if (isTRUE(clamp_neg)) pet_arr[pet_arr < 0] <- 0
   if (!is.null(winsor_q)) {
-    # BUGFIX: bounds were swapped for winsor_q > 0.5. With winsor_q = 0.99 the
-    # old code used the 99th percentile as the LOWER bound and the 1st as the
-    # UPPER, collapsing the image into nonsense. Inactive in the flagship run
-    # (winsor_q = NULL), but the rest of the pipeline uses the 0.99 convention,
-    # so enabling it here would have triggered the trap. Accept either
-    # convention explicitly.
+    # VOXEL-level winsorisation inside parcel extraction — nothing to do with
+    # the map-weight transform in compute_mbi.R. Off by default (winsor_q =
+    # NULL). Either convention is accepted: 0.01 and 0.99 both mean "trim the
+    # outer 1% at each end", so the bounds are sorted rather than assumed.
     x   <- pet_arr[gm_mask]
     plo <- min(winsor_q, 1 - winsor_q)
     phi <- max(winsor_q, 1 - winsor_q)

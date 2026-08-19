@@ -35,48 +35,53 @@ size_df <- fread(sizes_file, data.table = FALSE) %>%
 fdg     <- fread(fdg_file, data.table = FALSE) %>%
   mutate(region = as.character(region))
 
-# Parameters, overridable via config
-beta         <- cfg$mbi$beta         %||% 0.25
-map_method   <- cfg$mbi$map_method   %||% "robust_z"
-ratio        <- cfg$mbi$ratio        %||% 4
-clamp_z      <- cfg$mbi$clamp_z      %||% 2
-alpha        <- cfg$mbi$alpha        %||% NULL
+# Index parameters, overridable via config. See config_generic.yaml for what
+# each one does and helpers/compute_mbi.R for the algebra behind them.
+ratio        <- cfg$mbi$ratio        %||% "auto" # INERT for MBI; "auto" = read off the map
+clamp_z      <- cfg$mbi$clamp_z      %||% 3      # safety rail on outlier parcels
+emphasis     <- cfg$mbi$emphasis     %||% 1      # the only live weighting parameter
+beta         <- cfg$mbi$beta         %||% 0      # 0 = no size weighting
 coverage_thr <- cfg$mbi$coverage_thr %||% 0.80
 
-# legacy path only (map_method = "legacy"): reproduces the pre-rebuild build
-gamma        <- cfg$mbi$gamma        %||% 2.5
-winsor_q     <- cfg$mbi$winsor_q     %||% 0.99
+# Subjects must contribute ALL of these modalities to receive a score. NULL
+# scores anyone who clears coverage_thr on at least one modality and warns,
+# because MBI is a contrast: a different feature set is a different linear
+# functional, not a noisier estimate of the same one.
+required_modalities <- cfg$mbi$required_modalities %||% NULL
 
-if (!identical(map_method, "legacy") &&
-    (!is.null(cfg$mbi$gamma) || !is.null(cfg$mbi$winsor_q)))
-  message("note: gamma / winsor_q are ignored unless map_method = 'legacy'. ",
-          "Contrast is set by 'ratio' (max weight ratio, high vs low demand).")
+# Keys the index does not read. A config carrying one of these describes a
+# construction that is not the one being run, which is worth saying out loud.
+unused <- intersect(c("pooling","map_method","alpha","alpha_theta","gamma","winsor_q"),
+                    names(cfg$mbi))
+if (length(unused))
+  warning("config: the following mbi keys are not read by this pipeline and are ",
+          "IGNORED: ", paste(unused, collapse = ", "),
+          ". Remove them so the config documents what actually ran.",
+          call. = FALSE)
 
 # ---------------------------------------------------------------------------
 # SubVol reliability gate.
 #
-# ABSOLUTE volume threshold in mm^3, replacing the previous 20th-percentile
-# rule. The quantile version was unstable: it was recomputed over whatever
-# SubVol set survived upstream filtering, so removing a region for unrelated
-# reasons (e.g. no valid map weight) silently shifted which OTHER structures
-# were gated out. An absolute cut is invariant to that, which means this gate
-# and the map-validity filter in align_feature_set() commute and the order of
-# the two no longer needs defending.
+# Very small aseg structures are segmented least reliably, so their deviations
+# are dominated by measurement noise. Size stands in for reliability here; a
+# per-feature test-retest ICC gate across ALL modalities is the better
+# instrument where repeat scans exist, and the config hook for it is below.
 #
-# Rationale: very small aseg structures are segmented least reliably, so their
-# deviations are dominated by measurement noise. Size is a proxy for
-# reliability; the principled replacement is a per-feature test-retest ICC gate
-# (UKB repeat imaging visit), applied across ALL modalities rather than SubVol
-# alone. Config hook left below for that.
+# The threshold is ABSOLUTE (mm^3), deliberately not a quantile. A quantile cut
+# would be recomputed over whatever SubVol set survived upstream filtering, so
+# dropping a structure for an unrelated reason — no valid map weight, say —
+# would silently shift which OTHER structures were gated out. Being absolute,
+# this gate and the map-validity filter in align_feature_set() commute, and
+# their order does not have to be defended.
 #
-# !! SET FROM THE OBSERVED VOLUME DISTRIBUTION - the value below is a
-# !! set to 1000 mm^3: just below amygdala (1590), the smallest structure
-# !! surviving map-validity filtering, and close to the old effective cut (752).
+# !! SET THIS FROM THE OBSERVED VOLUME DISTRIBUTION OF YOUR OWN SEGMENTATION.
+# !! The default of 1000 mm^3 sits just below the amygdala in an aparc+aseg
+# !! parcellation; it is not a universal constant.
 # ---------------------------------------------------------------------------
 subvol_min_mm3 <- cfg$mbi$subvol_min_mm3 %||% 1000
 
 if (!is.null(cfg$mbi$subvol_gate_pct))
-  warning("config: 'subvol_gate_pct' is deprecated and ignored; ",
+  warning("config: 'subvol_gate_pct' is not read by this pipeline and is ignored; ",
           "using absolute 'subvol_min_mm3' = ", subvol_min_mm3, call. = FALSE)
 
 # Reserved for the ICC-based gate (all modalities). NULL = not in use.
@@ -91,6 +96,37 @@ message(sprintf("SubVol gate: keeping %d/%d structures at >= %.0f mm^3%s",
                 length(keep_sub), nrow(sub_sizes), subvol_min_mm3,
                 if (length(drop_sub))
                   paste0(" (dropped: ", paste(sort(drop_sub), collapse = ", "), ")") else ""))
+
+# Feature provenance: record the full expected feature set BEFORE any gate, so
+# the manifest can reconcile every feature in the map to its fate. feats_avgSize
+# carries every feature the feature map defined, fitted or not, which makes it
+# the only complete reference available at this stage.
+prov <- size_df %>%
+  dplyr::distinct(modality, region) %>%
+  dplyr::mutate(status = NA_character_)
+
+fitted_feats <- zs %>% dplyr::distinct(modality, region) %>% dplyr::mutate(.fit = TRUE)
+prov <- prov %>%
+  dplyr::left_join(fitted_feats, by = c("modality","region")) %>%
+  dplyr::mutate(status = ifelse(is.na(.fit), "dropped: no normative fit (stage 02)", status)) %>%
+  dplyr::select(-.fit)
+
+# Two distinct reasons a SubVol feature can fail the gate, recorded separately:
+# it can be genuinely too small, or it can have no usable size at all. Both
+# leave it out of keep_sub, and lumping them together puts a wrong explanation
+# in the one file whose purpose is to be trusted without re-derivation.
+sub_nosize <- sub_sizes %>%
+  dplyr::filter(!is.finite(as.numeric(size)) | as.numeric(size) <= 0) %>%
+  dplyr::pull(region)
+gated_small <- setdiff(setdiff(sub_sizes$region, keep_sub), sub_nosize)
+
+prov <- prov %>%
+  dplyr::mutate(status = dplyr::case_when(
+    !is.na(status)                                        ~ status,
+    modality == "SubVol" & region %in% sub_nosize         ~ "dropped: SubVol has no usable size",
+    modality == "SubVol" & region %in% gated_small        ~ sprintf("dropped: SubVol < %.0f mm3", subvol_min_mm3),
+    TRUE                                                  ~ status
+  ))
 
 zs <- zs %>% dplyr::filter(modality != "SubVol" | region %in% keep_sub)
 
@@ -109,30 +145,91 @@ if (!is.null(icc_file) && !is.null(icc_min)) {
 # ---------------------------------------------------------------------------
 res <- compute_flagship_abg(
   zs = zs, fdg = fdg, sizes = size_df,
-  beta = beta, map_method = map_method, ratio = ratio, clamp_z = clamp_z,
-  alpha = alpha, coverage_thr = coverage_thr,
-  gamma = gamma, winsor_q = winsor_q
+  ratio = ratio, clamp_z = clamp_z, emphasis = emphasis,
+  beta = beta, coverage_thr = coverage_thr,
+  required_modalities = required_modalities
 )
 
 mbi <- as.data.frame(res$scores)
-write.table(mbi, file = out_scores, sep = "\t", quote = FALSE, row.names = FALSE)
+write_tsv(mbi, out_scores)
 cat("Wrote: ", out_scores, "\n")
 
-# Feature manifest: exactly what entered both indices, and what was dropped.
-manifest <- rbind(
-  data.frame(region = res$features$kept,    status = "kept",    stringsAsFactors = FALSE),
-  data.frame(region = res$features$dropped, status = "dropped", stringsAsFactors = FALSE)
-)
-write.table(manifest, file = out_features, sep = "\t", quote = FALSE, row.names = FALSE)
+# ---------------------------------------------------------------------------
+# Feature manifest, FEATURE-LEVEL and complete.
+#
+# This file is the answer to "why does the index have fewer features than the
+# feature map?", and it has to be derivable without hand-counting. It starts
+# from the complete feature list and assigns every feature exactly one fate, so
+# it sums to the input count by construction.
+#
+# The reason it starts from `prov` (built above, from feats_avgSize) rather
+# than from what align_feature_set() saw: anything removed earlier — a feature
+# whose normative fit failed, a SubVol structure below the size gate — is
+# already absent from `zs`, so a manifest derived from `zs` would list it in
+# neither the kept nor the dropped column. Keep the pre-gate snapshot.
+# ---------------------------------------------------------------------------
+kept_regions <- res$features$kept
+prov <- prov %>%
+  dplyr::mutate(status = dplyr::case_when(
+    !is.na(status)            ~ status,
+    region %in% kept_regions  ~ "kept",
+    TRUE                      ~ "dropped: no valid map weight or size (align_feature_set)"
+  ))
+
+write_tsv(prov, out_features)
 cat("Wrote: ", out_features, "\n")
 
+cat("\nFeature provenance (every feature in the feature map, one fate each):\n")
+prov_tab <- prov %>% dplyr::count(status, name = "n_features") %>%
+  dplyr::arrange(dplyr::desc(n_features))
+print(as.data.frame(prov_tab), row.names = FALSE)
+cat(sprintf("TOTAL %d features in -> %d features in the index\n",
+            nrow(prov), sum(prov$status == "kept")))
+
+n_index <- sum(prov$status == "kept")
+if (n_index != res$concentration$n_features)
+  warning("manifest says ", n_index, " features kept but index_concentration() ",
+          "counted ", res$concentration$n_features,
+          ". These must agree; investigate before using this run.", call. = FALSE)
+
+# Modality composition of the scored sample.
+mc <- res$mbi_details$modality_composition
+if (!is.null(mc) && nrow(mc)) {
+  cat("\nModality composition of scored subjects:\n")
+  print(as.data.frame(mc), row.names = FALSE)
+  write_tsv(mc, file.path(out_stage, "mbi_modality_composition.txt"))
+}
+
 # Per-feature influence shares + N_eff, for QC and for the methods table.
-write.table(as.data.frame(res$concentration$shares), file = out_shares,
-            sep = "\t", quote = FALSE, row.names = FALSE)
+write_tsv(res$concentration$shares, out_shares)
 cat("Wrote: ", out_shares, "\n")
-cat(sprintf("N_eff = %.2f over %d features (b = %.3f)\n",
-            res$concentration$n_eff, res$concentration$n_features, res$concentration$b))
-cat(sprintf("map_method = %s | ratio = %.2f (realised %.2f) | beta = %.2f | R2(MBI_raw, GBI) = %.3f\n",
-            res$diagnostics$map_method, res$diagnostics$ratio,
-            res$diagnostics$realised_ratio, res$diagnostics$beta,
-            res$diagnostics$r2_raw_gbi))
+cat(sprintf("N_eff = %.2f over %d features, at the realised slope b = %.4f (%s)\n",
+            res$concentration$n_eff, res$concentration$n_features,
+            res$concentration$b, res$concentration$b_source))
+cat(sprintf("        %.2f at the design-time cosine slope b = %.4f\n",
+            res$concentration$n_eff_cosine, res$concentration$b_cosine))
+cat(sprintf("ratio = %.3f [%s] (realised %.2f) | clamp_z = %.2f | emphasis = %.2f | beta = %.2f | R2(mbi_raw, gbi) = %.4f\n",
+            res$diagnostics$ratio, res$diagnostics$ratio_source,
+            res$diagnostics$realised_ratio,
+            res$diagnostics$clamp_z, res$diagnostics$emphasis,
+            res$diagnostics$beta, res$diagnostics$r2_raw_gbi))
+
+cat("\nNOTE: `mbi` is the residual of mbi_raw on gbi WITHIN THIS SAMPLE. It is\n",
+    "      orthogonal to gbi and standardised here and nowhere else. Analyses on\n",
+    "      a subset of these subjects should re-residualise within that subset.\n", sep = "")
+
+write_run_info(out_stage, "03_run_mbi", opt$config, params = list(
+  emphasis = emphasis, clamp_z = clamp_z,
+  ratio = round(res$diagnostics$ratio, 6), ratio_source = res$diagnostics$ratio_source,
+  beta = beta,
+  coverage_thr = coverage_thr, subvol_min_mm3 = subvol_min_mm3,
+  required_modalities = required_modalities,
+  n_features_in = nrow(prov), n_features_index = n_index,
+  n_subjects = nrow(mbi),
+  n_eff = round(res$concentration$n_eff, 4),
+  n_eff_cosine = round(res$concentration$n_eff_cosine, 4),
+  b_empirical = round(res$concentration$b, 6),
+  b_cosine = round(res$concentration$b_cosine, 6),
+  r2_mbiraw_gbi = round(res$diagnostics$r2_raw_gbi, 6),
+  realised_ratio = round(res$diagnostics$realised_ratio, 4)
+))

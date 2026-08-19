@@ -81,10 +81,9 @@ inputs:
 
 mbi:
   beta: 0.25
-  map_method: robust_z
-  ratio: 4
-  clamp_z: 2
-  alpha: null
+  ratio: 1.73
+  clamp_z: 3
+  emphasis: 2
   coverage_thr: 0.80
   subvol_min_mm3: 1000
 

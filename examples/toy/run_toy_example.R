@@ -5,7 +5,7 @@
 #
 # Self-contained smoke test for the MBI pipeline.
 #
-# Computes the three flagship indices (GBI, MBI_raw, MBI) on the
+# Computes the three indices (GBI, MBI_raw, MBI) on the
 # bundled 10-subject toy cohort using the repository's real index
 # code (helpers/compute_mbi.R). It needs only base R + dplyr (+ yaml
 # if a config is present): no PET NIfTI maps, no FreeSurfer stats, no
@@ -74,12 +74,12 @@ col_icv  <- cm$icv  %||% "icv"
 # toy generic modality labels -> CT/SA/SubVol used by compute_mbi.R
 mm <- cfg$modality_map %||% list(thickness = "CT", area = "SA", volume = "SubVol")
 
-# index parameters (flagship defaults)
+# index parameters (config defaults)
 mb              <- cfg$mbi %||% list()
 beta            <- mb$beta            %||% 0.25
-map_method      <- mb$map_method      %||% "robust_z"
-ratio           <- mb$ratio           %||% 4
-clamp_z         <- mb$clamp_z         %||% 2
+ratio           <- mb$ratio           %||% "auto"
+clamp_z         <- mb$clamp_z         %||% 3
+emphasis        <- mb$emphasis        %||% 1
 coverage_thr    <- mb$coverage_thr    %||% 0.80
 subvol_min_mm3  <- mb$subvol_min_mm3  %||% 0   # toy sizes are synthetic; 0 = keep all
 icv_modalities  <- cfg$icv_modalities %||% c("SA", "SubVol")
@@ -182,8 +182,8 @@ zs <- zs %>% dplyr::filter(modality != "SubVol" | region %in% keep_sub)
 source(file.path(repo_root, "helpers", "compute_mbi.R"))
 res <- compute_flagship_abg(
   zs = zs, fdg = fdg, sizes = sizes,
-  beta = beta, map_method = map_method, ratio = ratio, clamp_z = clamp_z,
-  alpha = NULL, coverage_thr = coverage_thr
+  ratio = ratio, clamp_z = clamp_z, emphasis = emphasis,
+  beta = beta, coverage_thr = coverage_thr
 )
 scores <- as.data.frame(res$scores)
 

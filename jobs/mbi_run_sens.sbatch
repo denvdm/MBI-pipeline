@@ -28,7 +28,7 @@ export CANONICAL_OUTDIR="${CANONICAL_OUTDIR%/}"
 export PROJECT_ROOT="/path/to/mbi-pipeline"
 export MAPS_DIR="/path/to/maps"
 
-# Per-template PET file (uploaded from outside TSD).
+# Per-template PET file.
 # Default matches the filename produced by helpers/get_dellarosa_template.py:
 #   source-dellarosa2014_desc-fdg_space-MNI152_feature.nii.gz
 # Override ALT_PET_FILE explicitly for any other template.

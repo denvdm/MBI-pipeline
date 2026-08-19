@@ -37,6 +37,19 @@ k_age <- cfg$normative$k_age %||% 10
 use_site_RE <- isTRUE(cfg$normative$use_site_RE %||% TRUE)
 sex_interact <- isTRUE(cfg$normative$sex_interact %||% FALSE)
 
+# Location-SCALE normative model (mgcv gaulss). Each subject is z-scored
+# against their own sigma_i = sigma(age, sex, scanner) rather than one scalar
+# sigma per feature. See helpers/normative_modeling.R for why this matters more
+# for a contrast index than for a mean index; false gives a location-only fit
+# and is a diagnostic comparison, not an alternative specification.
+variance_model <- isTRUE(cfg$normative$variance_model %||% TRUE)
+k_age_scale    <- cfg$normative$k_age_scale %||% 5
+
+cat(sprintf("[normative] model = %s (k_age = %d%s)\n",
+            if (variance_model) "location-scale, mgcv gaulss" else "location-only, gaussian",
+            k_age,
+            if (variance_model) sprintf(", k_age_scale = %d", k_age_scale) else ""))
+
 # -----------------------------
 # Runtime
 # -----------------------------
@@ -76,6 +89,21 @@ fm$region <- as.character(fm$region)
 if (any(duplicated(fm$feature))) {
   dups <- unique(fm$feature[duplicated(fm$feature)])
   stop("feature_map_file has duplicated 'feature' entries (must be unique). Examples: ", paste(head(dups, 5), collapse = ", "), call. = FALSE)
+}
+
+# ...and a unique (modality, region) per feature. Nothing downstream can detect
+# a violation: two features sharing a (modality, region) make the cortical
+# volume computation below produce list-columns, and if they sit in different
+# modalities the region simply contributes twice to both indices, showing up in
+# the influence shares with no explanation. It has to be caught here.
+fm_key <- paste(fm$modality, fm$region, sep = "|")
+if (any(duplicated(fm_key))) {
+  dupk <- unique(fm_key[duplicated(fm_key)])
+  stop("feature_map_file maps more than one feature to the same ",
+       "(modality, region): ", paste(head(dupk, 5), collapse = "; "),
+       if (length(dupk) > 5) sprintf(" ... and %d more", length(dupk) - 5) else "",
+       ". Each (modality, region) must correspond to exactly one feature.",
+       call. = FALSE)
 }
 
 # Validate required covariate columns
@@ -130,6 +158,26 @@ if (nzchar(train_ids_file) && file.exists(train_ids_file)) {
   train_mask <- dt$id %in% as.character(train_ids)
   cat(sprintf("[split] Fitting normative models on %d/%d subjects (discovery)\n",
               sum(train_mask), nrow(dt)))
+
+  # A scanner with no discovery subjects still receives predictions, because
+  # subsetting a factor keeps its levels: mgcv sees the level, fits its random
+  # effect on nothing, shrinks it to zero and says nothing. Those subjects are
+  # then z-scored against a scanner effect that was never estimated. Warn
+  # loudly rather than let it pass.
+  sc_tab <- table(dt$scanner, ifelse(train_mask, "train", "held_out"))
+  empty  <- rownames(sc_tab)[sc_tab[, "train"] == 0 &
+                             (if ("held_out" %in% colnames(sc_tab)) sc_tab[, "held_out"] > 0 else FALSE)]
+  if (length(empty))
+    warning("[split] scanner level(s) with ZERO discovery subjects but held-out ",
+            "subjects present: ", paste(empty, collapse = ", "),
+            ". Their scanner random effect is not estimated; those deviations ",
+            "are not comparable to the rest. Drop them or rebuild the split.",
+            call. = FALSE)
+
+  thin <- rownames(sc_tab)[sc_tab[, "train"] > 0 & sc_tab[, "train"] < 30]
+  if (length(thin))
+    message(sprintf("[split] scanner level(s) with fewer than 30 discovery subjects: %s",
+                    paste(thin, collapse = ", ")))
 }
 
 # -----------------------------
@@ -140,8 +188,8 @@ if (nzchar(train_ids_file) && file.exists(train_ids_file)) {
 # -----------------------------
 if ("icv_raw" %in% names(dt) && any(is.finite(dt$icv_raw))) {
   # Guard the scanner random effect: s(scanner, bs = "re") errors out on a
-  # single-level factor (any non-UKB dataset with one site). fit_one_feature()
-  # already guards this; the ICV model did not.
+  # single-level factor, i.e. on any single-site dataset. fit_one_feature()
+  # carries the same guard.
   icv_frm <- if (length(levels(dt$scanner)) > 1L) {
     icv_raw ~ s(age, k = 5, bs = "cs") + sex + s(scanner, bs = "re")
   } else {
@@ -163,25 +211,63 @@ needs_icv <- function(feat) {
 }
 
 # -----------------------------
-# Save raw values (debugging / downstream)
+# Optionally save raw values
 # -----------------------------
-write.table(dt, file = out_raw, sep = "\t", quote = FALSE, row.names = FALSE)
+# A verbatim copy of the input feature table, and the largest file this stage
+# can produce. Nothing in the pipeline reads it, so it is off by default; set
+# outputs.write_raw_values: true if something downstream of yours consumes it.
+# The skip is announced rather than silent, so a broken downstream step points
+# straight back here.
+write_raw_values <- isTRUE(cfg$outputs$write_raw_values %||% FALSE)
+if (write_raw_values) {
+  write_tsv(dt, out_raw)
+  cat("Wrote: ", out_raw, "\n", sep = "")
+} else {
+  cat("[normative] skipping feats_rawVals.txt (outputs.write_raw_values is false)\n")
+}
 
 # -----------------------------
 # Feature sizes (raw, pre-winsorization)
 # -----------------------------
-# Computed on the DISCOVERY subset when a split is active. Previously used the
-# full sample, while the manuscript Methods state "mean raw value of region r
-# in the discovery sample" - numerically negligible at this N, but the code
-# should do what the paper says it does.
+# Computed on the DISCOVERY subset when a split is active, so that `size` is a
+# property of the sample the normative models were fitted on and not of the
+# sample being scored.
 feat_mean <- vapply(feature_cols,
                     function(f) mean(dt[[f]][train_mask], na.rm = TRUE),
                     numeric(1))
-sizes_df <- fm %>%
-  dplyr::mutate(size = as.numeric(feat_mean[feature])) %>%
+# `size` is the TISSUE VOLUME (mm^3) each feature describes:
+#   CT / SA feature for region r -> mean thickness_r * mean area_r
+#   SubVol structure s           -> mean volume_s
+#
+# Volume, not the mean of the feature itself. Because stage 03 pools globally,
+# `size` is raised to beta and compared ACROSS modalities, so it must carry one
+# unit for every feature. The feature means do not: a thickness is mm (~2.5),
+# an area mm^2 (~2000), a volume mm^3 (~5000), and using them directly would
+# suppress cortical thickness by an order of magnitude for reasons of units
+# alone. At beta = 0 the size term is inert, but it must be coherent for beta
+# to mean anything when turned up.
+sizes_df <- fm %>% dplyr::mutate(raw_mean = as.numeric(feat_mean[feature]))
+
+cort_vol <- sizes_df %>%
+  dplyr::filter(modality %in% c("CT", "SA")) %>%
+  dplyr::select(region, modality, raw_mean) %>%
+  tidyr::pivot_wider(names_from = modality, values_from = raw_mean) %>%
+  dplyr::mutate(cortical_volume = CT * SA) %>%
+  dplyr::select(region, cortical_volume)
+
+sizes_df <- sizes_df %>%
+  dplyr::left_join(cort_vol, by = "region") %>%
+  dplyr::mutate(size = ifelse(modality %in% c("CT", "SA"),
+                              cortical_volume, raw_mean)) %>%
   dplyr::select(modality, region, size)
 
-write.table(sizes_df, file = out_sizes, sep = "\t", quote = FALSE, row.names = FALSE)
+n_bad <- sum(!is.finite(sizes_df$size) | sizes_df$size <= 0)
+if (n_bad)
+  warning("feats_avgSize: ", n_bad, " feature(s) lack a usable size ",
+          "(cortical region missing its CT or SA partner?); align_feature_set() ",
+          "will drop them", call. = FALSE)
+
+write_tsv(sizes_df, out_sizes)
 
 # -----------------------------
 # Winsorize feature values for modeling
@@ -192,64 +278,155 @@ dt[feature_cols] <- lapply(dt[feature_cols], winsorize, lower = 0.001, upper = 0
 # -----------------------------
 # Fit normative models
 # -----------------------------
+# One payload per feature: the covariates plus that feature's winsorised and
+# raw columns, and nothing else.
+#
+# The obvious formulation — future_lapply over feature names, with the function
+# closing over dt and dt_raw — makes the whole subject x feature matrix a
+# global. Every worker then receives a copy of both tables (at 95k subjects and
+# 160 features, roughly 250 MB each way) in order to fit a model that reads one
+# feature column and four covariates. It is also a scaling cliff, because
+# future.globals.maxSize defaults to 500 MiB and a wider feature table trips it
+# with an error that says nothing about the cause.
+#
+# Iterating over the payloads instead means future ships each worker only the
+# chunk it is about to fit. It also makes newdata for predict() four columns
+# wide rather than the full table, which mgcv would otherwise rebuild a model
+# frame from on every one of the 160 calls.
+covar_cols <- c("age", "sex", "scanner")
+if ("icv" %in% names(dt)) covar_cols <- c(covar_cols, "icv")
+covars <- dt[, covar_cols, drop = FALSE]
+ids    <- dt$id
+
+feat_payload <- lapply(feature_cols, function(f) list(
+  feat     = f,
+  y        = dt[[f]],
+  y_raw    = dt_raw[[f]],
+  with_icv = isTRUE(needs_icv(f))
+))
+
+# dt / dt_raw are not referenced past this point; dropping them keeps them out
+# of the exported globals and halves peak memory in the parent process.
+rm(dt, dt_raw); invisible(gc(FALSE))
+
 cat(sprintf("Fitting %d features with %d workers...\n", length(feature_cols), n_cores))
 res_list <- future_lapply(
-  feature_cols,
-  function(f) fit_one_feature(
-    feat = f,
-    dt = dt,
-    dt_raw = dt_raw,
-    k_age = k_age,
-    use_site_RE = use_site_RE,
-    sex_interact = sex_interact,
-    needs_icv = needs_icv,
-    train_mask = train_mask
-  ),
+  feat_payload,
+  function(p) {
+    d  <- covars
+    d[[p$feat]] <- p$y
+    dr <- stats::setNames(data.frame(p$y_raw, stringsAsFactors = FALSE), p$feat)
+    fit_one_feature(
+      feat           = p$feat,
+      dt             = d,
+      dt_raw         = dr,
+      k_age          = k_age,
+      use_site_RE    = use_site_RE,
+      sex_interact   = sex_interact,
+      needs_icv      = function(...) p$with_icv,
+      train_mask     = train_mask,
+      variance_model = variance_model,
+      k_age_scale    = k_age_scale
+    )
+  },
   future.seed = TRUE
 )
 
 future::plan(future::sequential)
+rm(feat_payload); invisible(gc(FALSE))
 
 qc_df <- do.call(rbind, lapply(res_list, function(r) {
   if (!is.list(r)) return(NULL)
   data.frame(
-    feature = r$feat,
-    ok      = isTRUE(r$ok),
-    sigma   = r$sigma %||% NA_real_,
-    edf_age = r$edf_age %||% NA_real_,
-    r2      = r$r2 %||% NA_real_,
-    n_train = r$n_train %||% NA,
-    msg     = r$msg %||% NA_character_,
+    feature        = r$feat,
+    ok             = isTRUE(r$ok),
+    variance_model = r$variance_model %||% NA,
+    sigma          = r$sigma %||% NA_real_,      # median sigma_i under gaulss
+    sigma_p10      = r$sigma_p10 %||% NA_real_,
+    sigma_p90      = r$sigma_p90 %||% NA_real_,
+    sigma_ratio    = r$sigma_ratio %||% NA_real_, # p90/p10; 1.0 = homoscedastic
+    edf_age        = r$edf_age %||% NA_real_,
+    edf_age_scale  = r$edf_age_scale %||% NA_real_,
+    r2             = r$r2 %||% NA_real_,
+    n_train        = r$n_train %||% NA,
+    msg            = r$msg %||% NA_character_,
     stringsAsFactors = FALSE
   )
 }))
 
-write.table(qc_df, file = out_qc, sep = "\t", quote = FALSE, row.names = FALSE)
+write_tsv(qc_df, out_qc)
+
+# ---------------------------------------------------------------------------
+# Loud accounting of the feature set.
+#
+# A feature that fails here never enters the z matrix, so it never reaches
+# align_feature_set() in stage 03 either. Without this block its only trace
+# would be one row in normative_qc.txt, and the number of features in the index
+# would be an OUTCOME of model fitting rather than a specification — free to
+# differ between runs, or between the hemisphere subsets used for the
+# split-half. Stage 03 reconciles the full count against feats_avgSize.txt,
+# which carries every feature in the map whether fitted or not; this block
+# makes the same count visible at the point of failure.
+# ---------------------------------------------------------------------------
+n_fail <- sum(!qc_df$ok)
+cat(sprintf("[normative] %d/%d features fitted; %d failed\n",
+            sum(qc_df$ok), nrow(qc_df), n_fail))
+if (n_fail) {
+  cat("[normative] FEATURES DROPPED AT STAGE 02 (they will not reach the index):\n")
+  print(qc_df[!qc_df$ok, c("feature", "edf_age", "r2", "msg")], row.names = FALSE)
+}
+if (variance_model) {
+  fell_back <- sum(!is.na(qc_df$msg) & grepl("^gaulss failed", qc_df$msg))
+  if (fell_back)
+    warning("[normative] ", fell_back, " feature(s) fell back to the location-only ",
+            "model because gaulss did not converge. The run is a MIXTURE of the two ",
+            "models; see the msg column of normative_qc.txt.", call. = FALSE)
+  sr <- qc_df$sigma_ratio[qc_df$ok & is.finite(qc_df$sigma_ratio)]
+  if (length(sr))
+    cat(sprintf("[normative] heteroscedasticity across subjects (sigma p90/p10): median %.2f, max %.2f\n",
+                median(sr), max(sr)))
+}
 
 ok_res <- Filter(function(x) is.list(x) && isTRUE(x$ok), res_list)
 
-Z <- data.table(id = dt$id)
-MU <- data.table(id = dt$id)
-for (r in ok_res) {
-  Z[[r$feat]]  <- r$z
-  MU[[r$feat]] <- r$mu
-}
+if (!length(ok_res))
+  stop("No feature fitted successfully at stage 02. See ", out_qc,
+       " for the per-feature reason.", call. = FALSE)
 
-write.table(Z,  file = out_z,  sep = "\t", quote = FALSE, row.names = FALSE)
-write.table(MU, file = out_mu, sep = "\t", quote = FALSE, row.names = FALSE)
+# Assemble by building the column list first and converting once. Repeated
+# `Z[[name]] <- value` on a data.table reallocates on each assignment, which at
+# 160 features and 95k rows is 160 copies of the whole table.
+Z  <- data.table::setDT(c(list(id = ids),
+                          stats::setNames(lapply(ok_res, `[[`, "z"),
+                                          vapply(ok_res, `[[`, character(1), "feat"))))
+MU <- data.table::setDT(c(list(id = ids),
+                          stats::setNames(lapply(ok_res, `[[`, "mu"),
+                                          vapply(ok_res, `[[`, character(1), "feat"))))
 
-# Long format using feature_map
-Z_df <- as.data.frame(Z)
-zs_long <- Z_df %>%
-  tidyr::pivot_longer(
-    cols = -id,
-    names_to = "feature",
-    values_to = "z"
-  ) %>%
-  dplyr::left_join(fm, by = "feature") %>%
-  dplyr::filter(!is.na(modality) & !is.na(region)) %>%
-  dplyr::select(id, modality, region, z)
+write_tsv(Z,  out_z)
+write_tsv(MU, out_mu)
 
-write.table(zs_long, file = out_long, sep = "\t", quote = FALSE, row.names = FALSE)
+# Long format using feature_map. melt() rather than pivot_longer(): this is the
+# largest object the pipeline handles (subjects x features, ~15M rows at UK
+# Biobank scale) and tidyr materialises considerably more of it at once.
+zs_long <- data.table::melt(Z, id.vars = "id", variable.name = "feature",
+                            value.name = "z", variable.factor = FALSE)
+fm_dt   <- data.table::as.data.table(fm)[, .(feature, modality, region)]
+zs_long <- merge(zs_long, fm_dt, by = "feature", all.x = TRUE, sort = FALSE)
+zs_long <- zs_long[!is.na(modality) & !is.na(region)]
+# Sort explicitly. Nothing downstream depends on row order, but a deterministic
+# order makes two runs byte-comparable, which is the cheapest reproducibility
+# check there is.
+data.table::setorder(zs_long, id, feature)
+zs_long <- zs_long[, .(id, modality, region, z)]
 
+write_tsv(zs_long, out_long)
 cat("Wrote: ", out_long, "\n")
+
+write_run_info(out_stage, "02_run_normdevs", opt$config, params = list(
+  k_age = k_age, k_age_scale = k_age_scale, variance_model = variance_model,
+  use_site_RE = use_site_RE, sex_interact = sex_interact,
+  icv_modalities = icv_modalities,
+  n_features_in = length(feature_cols), n_features_fitted = length(ok_res),
+  n_subjects = length(ids), train_ids = if (nzchar(train_ids_file)) train_ids_file else "none"
+))

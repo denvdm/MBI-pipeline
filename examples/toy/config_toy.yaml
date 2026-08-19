@@ -40,11 +40,11 @@ pet_weights:
   R03: 0.70
   R04: 0.90
 
-# Index parameters (flagship defaults).
+# Index parameters (config defaults).
 mbi:
   beta: 0.25
-  map_method: robust_z
-  ratio: 4
-  clamp_z: 2
+  ratio: auto
+  clamp_z: 3
+  emphasis: 1
   coverage_thr: 0.80
   subvol_min_mm3: 0     # synthetic sizes; keep all structures

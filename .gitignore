@@ -14,3 +14,7 @@ out/
 
 # Toy example outputs
 examples/toy/output/
+
+# Python bytecode
+__pycache__/
+*.pyc

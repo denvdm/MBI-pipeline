@@ -5,9 +5,9 @@ authors:
   - family-names: "van der Meer"
     given-names: "Dennis"
     affiliation: "Centre for Precision Psychiatry, University of Oslo"
-    orcid: "0000-0002-0466-386X"   # (optional—add if you want)
-version: 0.2.0
-date-released: 2026-08-13
+    orcid: "https://orcid.org/0000-0002-0466-386X"
+version: 0.4.0
+date-released: "2026-08-18"
 repository-code: "https://github.com/denvdm/MBI-pipeline"
 license: "MIT"
 keywords:

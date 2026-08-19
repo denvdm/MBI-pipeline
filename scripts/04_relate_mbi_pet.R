@@ -2,7 +2,6 @@
 suppressPackageStartupMessages({
   library(dplyr)
   library(data.table)
-  library(broom)
   library(tidyr)
 })
 
@@ -32,7 +31,7 @@ mods_use       <- cfg$qc$mods_use        %||% c("CT","SA","SubVol")
 subvol_min_mm3 <- cfg$mbi$subvol_min_mm3 %||% 1000
 
 if (!is.null(cfg$mbi$subvol_gate_pct))
-  warning("config: 'subvol_gate_pct' is deprecated and ignored; ",
+  warning("config: 'subvol_gate_pct' is not read by this pipeline and is ignored; ",
           "using absolute 'subvol_min_mm3' = ", subvol_min_mm3, call. = FALSE)
 
 fdg_use <- prep_fdg(fdg)
@@ -41,28 +40,35 @@ Zc <- collapse_zs(zs_gated, fdg_use, mods_use = mods_use)
 
 mods_tag <- paste(mods_use, collapse = "+")
 
-align_tab <- bind_rows(
-  pc_pet_alignment(Zc, fdg_use, mods_tag),
-  loo_pet_alignment(Zc, fdg_use)
-)
+# The PC1 decomposition and the leave-one-out slopes each feed two outputs.
+# Compute each once and pass it in, rather than letting every consumer rebuild
+# it from Zc.
+pc1   <- region_pc1(Zc)
+betas <- region_loo_betas(Zc)
 
-write.table(align_tab, file = file.path(out_stage, "pet_alignment_summary.txt"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+align_tab <- bind_rows(
+  pc_pet_alignment(Zc, fdg_use, mods_tag, pc1 = pc1),
+  loo_pet_alignment(Zc, fdg_use, betas = betas)
+)
+write_tsv(align_tab, file.path(out_stage, "pet_alignment_summary.txt"))
 
 row_subj <- subject_pet_alignment(Zc, fdg_use)
-write.table(row_subj, file = file.path(out_stage, "subject_alignment_summary.txt"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+write_tsv(row_subj, file.path(out_stage, "subject_alignment_summary.txt"))
 
-pc1_tbl <- pc1_loadings_table(Zc, fdg_use, align_to_pet = TRUE)
-write.table(pc1_tbl, file = file.path(out_stage, "pc1_regional_z.txt"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+pc1_tbl <- pc1_loadings_table(Zc, fdg_use, align_to_pet = TRUE, pc1 = pc1)
+write_tsv(pc1_tbl, file.path(out_stage, "pc1_regional_z.txt"))
 
 meanZ <- mean_z_per_region(Zc)
-write.table(meanZ, file = file.path(out_stage, "mean_regional_z.txt"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+write_tsv(meanZ, file.path(out_stage, "mean_regional_z.txt"))
 
-looB <- loo_beta_map(Zc)
-write.table(looB, file = file.path(out_stage, "roi_beta_LOO.tsv"),
-            sep = "\t", row.names = FALSE, quote = FALSE)
+looB <- loo_beta_map(Zc, betas = betas)
+write_tsv(looB, file.path(out_stage, "roi_beta_LOO.tsv"))
 
 cat("Wrote QC outputs to: ", out_stage, "\n")
+
+write_run_info(out_stage, "04_relate_mbi_pet", opt$config, params = list(
+  mods_use = mods_use, subvol_min_mm3 = subvol_min_mm3,
+  n_regions = length(pc1$region),
+  n_subjects = row_subj$n_subjects,
+  var_explained_pc1 = round(pc1$var_explained, 6)
+))

@@ -2,7 +2,7 @@
 # Compare canonical and alt PET-template MBI outputs (Tier 0 + Tier 1).
 #
 # Tier 0: weight-vector correlation across regions, raw and after the
-#         pipeline's gamma + p99-winsor transform.
+#         pipeline's map-weight transform.
 # Tier 1: subject-level construct correlations for MBI_raw, GBI, and the
 #         GBI-residualised MBI.
 #
@@ -30,25 +30,21 @@ fisher_ci <- function(r, n, conf = 0.95) {
   c(lo = tanh(z - zc * se), hi = tanh(z + zc * se))
 }
 
-# The PET-weight transform is defined ONCE, in compute_mbi.R. This file used to
-# carry its own copy with a comment saying it "mirrors" the index - two code
-# paths that must agree, with nothing enforcing it. Aliasing means any change to
-# the transform reaches the cross-template comparison automatically, so SF3 can
-# never silently validate a construction the index no longer uses.
+# The map-weight transform is defined ONCE, in compute_mbi.R, and aliased here.
+# Do not copy it into this file: a second implementation would let the
+# cross-template comparison validate a construction the index does not use, with
+# nothing enforcing that the two stay in step.
 if (!exists("transform_map_weights", mode = "function")) {
   stop("compare_pet_funcs.R requires compute_mbi.R to be sourced first ",
        "(transform_map_weights() not found).", call. = FALSE)
 }
-apply_pet_transform <- function(w, method = "robust_z", ratio = 4, clamp_z = 2,
-                                gamma = 2.5, winsor_q = 0.99) {
-  transform_map_weights(w, method = method, ratio = ratio, clamp_z = clamp_z,
-                        gamma = gamma, winsor_q = winsor_q, global_norm = TRUE)
+apply_pet_transform <- function(w, ratio = "auto", clamp_z = 3, emphasis = 1) {
+  transform_map_weights(w, ratio = ratio, clamp_z = clamp_z, emphasis = emphasis)
 }
 
 # Tier 0: regional weight-vector comparison
 compare_weights_regional <- function(w_canon_df, w_alt_df,
-                                     method = "robust_z", ratio = 4, clamp_z = 2,
-                                     gamma = 2.5, winsor_q = 0.99,
+                                     ratio = "auto", clamp_z = 3, emphasis = 1,
                                      drop_ventricles = TRUE) {
   stopifnot(all(c("region", "weight") %in% names(w_canon_df)))
   stopifnot(all(c("region", "weight") %in% names(w_alt_df)))
@@ -71,8 +67,8 @@ compare_weights_regional <- function(w_canon_df, w_alt_df,
   # Each template is transformed on ITS OWN robust statistics, which is the
   # point of the comparison: agreement should reflect shared topography, not a
   # shared arbitrary scale imposed from outside.
-  d$w_canon_g <- apply_pet_transform(d$w_canon, method, ratio, clamp_z, gamma, winsor_q)
-  d$w_alt_g   <- apply_pet_transform(d$w_alt,   method, ratio, clamp_z, gamma, winsor_q)
+  d$w_canon_g <- apply_pet_transform(d$w_canon, ratio, clamp_z, emphasis)
+  d$w_alt_g   <- apply_pet_transform(d$w_alt,   ratio, clamp_z, emphasis)
 
   metrics <- function(x, y, label) {
     ok <- is.finite(x) & is.finite(y)
@@ -95,10 +91,7 @@ compare_weights_regional <- function(w_canon_df, w_alt_df,
     )
   }
 
-  tag <- if (identical(method, "legacy"))
-    sprintf("after_legacy_gamma%.2f_winsorq%.2f", gamma, winsor_q)
-  else
-    sprintf("after_%s_ratio%.2f", method, ratio)
+  tag <- sprintf("after_transform_ratio%.2f_clampz%.2f_emph%.2f", ratio, clamp_z, emphasis)
   out <- bind_rows(
     metrics(d$w_canon,   d$w_alt,   "raw_normalised"),
     metrics(d$w_canon_g, d$w_alt_g, tag)

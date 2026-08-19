@@ -10,12 +10,14 @@
 #   - features_wide.tsv : subject × (covariates + features)
 #   - feature_map.tsv   : feature → (modality, region) map
 #
-# Ventricles (lateral, inferior, 3rd, 4th, 5th) are intentionally excluded:
-# they carry essentially no metabolic signal, and any apparent FDG signal in
-# ventricular voxels reflects partial-volume effects rather than biology.
+# Ventricles (lateral, inferior, 3rd, 4th, 5th) are excluded: they carry
+# essentially no metabolic signal, so any apparent FDG in ventricular voxels is
+# partial-volume contamination from surrounding tissue rather than biology, and
+# the region has no valid metabolic prior to weight by. Their MRI volume signal
+# is largely recoverable from neighbouring atrophy measures.
 #
-# Aseg names are normalised to canonical lh_*/rh_* form, accepting both old
-# FreeSurferColorLUT-style ("Left-Thalamus-Proper") and new UKB-stats-style
+# Aseg names are normalised to canonical lh_*/rh_* form, accepting both
+# FreeSurferColorLUT-style ("Left-Thalamus-Proper") and stats-table-style
 # ("lh_Thalamus_Proper") inputs.
 
 rm(list = ls())
@@ -125,8 +127,8 @@ cortex <- dplyr::full_join(thick, area, by = "MRID")
 aseg <- read_fs(file.path(fs_dir, f_aseg))
 
 # --- Normalise aseg column names to a canonical form ---------------------
-# Accepts both old (FreeSurferColorLUT-style: "Left-Thalamus-Proper") and
-# new UKB-stats-style ("lh_Thalamus_Proper") and converts both to lh_*/rh_*
+# Accepts FreeSurferColorLUT-style ("Left-Thalamus-Proper") and
+# stats-table-style ("lh_Thalamus_Proper") names, converting both to lh_*/rh_*
 # with underscore separators. Ventricle digit prefixes normalised.
 normalise_aseg_names <- function(nm) {
   nm <- gsub("^Left-",  "lh_", nm)
@@ -137,14 +139,12 @@ normalise_aseg_names <- function(nm) {
   nm <- gsub("^Third_",  "3rd_", nm)
   nm <- gsub("^Fourth_", "4th_", nm)
   nm <- gsub("^Fifth_",  "5th_", nm)
-  nm <- sub("_Thalamus$", "_Thalamus_Proper", nm)
   nm
 }
 names(aseg) <- normalise_aseg_names(names(aseg))
 
-# Pragmatic aseg selection (canonical names; accepts either FS naming convention).
-# Ventricles are intentionally excluded (no real metabolic signal; any apparent
-# FDG in ventricular voxels is partial-volume or other artefact).
+# Aseg selection (canonical names; accepts either FS naming convention).
+# Ventricles are excluded — see the header.
 asegNonhemi <- c(
   "EstimatedTotalIntraCranialVol",
   "Brain_Stem",
@@ -209,7 +209,7 @@ cat(sprintf("[adapter] feature counts by modality: %s\n",
 # Restrict wide table to mapped features + covariates (covariates first for readability)
 dt_wide <- dt[, c(cov_cols, fm$feature), drop = FALSE]
 
-write.table(dt_wide, file = out_wide, sep = "\t", quote = FALSE, row.names = FALSE)
-write.table(fm,      file = out_map,  sep = "\t", quote = FALSE, row.names = FALSE)
+write_tsv(dt_wide, out_wide)
+write_tsv(fm,      out_map)
 
 cat("Wrote:\n- ", out_wide, "\n- ", out_map, "\n", sep = "")

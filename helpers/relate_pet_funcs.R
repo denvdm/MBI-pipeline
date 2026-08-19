@@ -3,7 +3,6 @@
 suppressPackageStartupMessages({
   library(dplyr)
   library(data.table)
-  library(broom)
   library(tidyr)
 })
 
@@ -86,6 +85,17 @@ gate_subvol <- function(zs, size_df, min_mm3 = 1000) {
     dplyr::filter(modality != "SubVol" | region %in% keep_sub)
 }
 
+# Collapse to one deviation per (subject, region) by averaging across the
+# modalities that describe that region.
+#
+# NOTE THAT THIS IS NOT WHAT THE INDEX DOES. The index treats every (modality,
+# region) as its own feature with its own weight, so a cortical region enters
+# twice, via CT and via SA. Here the two are averaged into one number, because
+# the diagnostics below are region-level by construction: a PCA over regions, a
+# leave-one-region-out slope, a per-subject correlation against a region-wise
+# map. The alignment these functions report is therefore an alignment of a
+# region-level summary of the deviations with the map, not of the index itself.
+# Close enough to be informative, different enough to state when reporting.
 collapse_zs <- function(zs, fdg_use, mods_use = c("CT", "SA", "SubVol")) {
   zcol <- pick_z_col(zs)
 
@@ -102,9 +112,16 @@ collapse_zs <- function(zs, fdg_use, mods_use = c("CT", "SA", "SubVol")) {
     dplyr::semi_join(fdg_use, by = "region")
 }
 
-# --- PC1 loadings × PET -------------------------------------------------------
-
-pc_pet_alignment <- function(Z_collapsed, fdg_use, mods_tag) {
+# --- PC1, computed once ------------------------------------------------------
+# Both the alignment summary and the loadings table need the same PC1. Compute
+# it once with region_pc1() and pass the result to each, rather than letting
+# every consumer rebuild the wide matrix and decompose it again.
+#
+# CAVEAT to state wherever these loadings are reported: X[is.na(X)] <- 0 after
+# scaling is mean-imputation. A region observed in fewer subjects is pulled
+# toward the sample mean, which shrinks its loading. Acceptable for a QC
+# diagnostic, misleading if read as a substantive regional ranking.
+region_pc1 <- function(Z_collapsed) {
   M <- Z_collapsed %>%
     tidyr::pivot_wider(names_from = region, values_from = z) %>%
     dplyr::arrange(id) %>%
@@ -120,12 +137,24 @@ pc_pet_alignment <- function(Z_collapsed, fdg_use, mods_tag) {
   X <- scale(M[, keep, drop = FALSE])
   X[is.na(X)] <- 0
 
-  p <- prcomp(X, center = FALSE, scale. = FALSE)
+  # Eigen-decomposition of the region x region cross-product rather than a full
+  # SVD of the subject x region matrix. Identical to prcomp()'s rotation and
+  # sdev to machine precision (verified), at a fraction of the cost: the small
+  # matrix is n_regions square, the large one has a row per subject.
+  ev <- eigen(crossprod(X), symmetric = TRUE)
+  lam <- pmax(ev$values, 0)
 
-  pc1_tbl <- tibble(
-    region  = colnames(X),
-    loading = as.numeric(p$rotation[, 1])
-  ) %>%
+  list(
+    region       = colnames(X),
+    loading      = as.numeric(ev$vectors[, 1]),
+    var_explained = unname(lam[1] / sum(lam))
+  )
+}
+
+pc_pet_alignment <- function(Z_collapsed, fdg_use, mods_tag, pc1 = NULL) {
+  if (is.null(pc1)) pc1 <- region_pc1(Z_collapsed)
+
+  pc1_tbl <- dplyr::tibble(region = pc1$region, loading = pc1$loading) %>%
     dplyr::inner_join(fdg_use, by = "region")
 
   rP  <- suppressWarnings(cor(pc1_tbl$loading, pc1_tbl$w_pet, use = "pairwise"))
@@ -146,29 +175,50 @@ pc_pet_alignment <- function(Z_collapsed, fdg_use, mods_tag) {
   )
 }
 
-# --- LOO contribution map × PET ----------------------------------------------
-
-loo_pet_alignment <- function(Z_collapsed, fdg_use) {
+# --- LOO contribution map, computed once -------------------------------------
+# For each region: regress the leave-that-region-out mean deviation on the
+# region's own deviation. The slope says how much a region's deviation tracks
+# the rest of the brain.
+#
+# Closed form rather than one lm() per region. This is a simple bivariate
+# regression, so the slope is Sxy/Sxx and the standard error follows from the
+# residual sum of squares — algebraically identical to lm(), and verified equal
+# to it to ~1e-15 on the slope, standard error, t and p. The previous version
+# One lm() per region inside dplyr::do() costs a full model fit over every
+# subject, and stage 04 needs these betas in two places.
+region_loo_betas <- function(Z_collapsed) {
   sub_sum <- Z_collapsed %>%
     dplyr::group_by(id) %>%
-    dplyr::summarise(
-      S = sum(z),
-      P = dplyr::n(),
-      .groups = "drop"
-    )
+    dplyr::summarise(S = sum(z), P = dplyr::n(), .groups = "drop")
 
-  Z2 <- Z_collapsed %>%
+  Z_collapsed %>%
     dplyr::inner_join(sub_sum, by = "id") %>%
-    dplyr::mutate(GI_minus_r = (S - z) / pmax(P - 1L, 1L))
-
-  betas <- Z2 %>%
+    dplyr::mutate(GI_minus_r = (S - z) / pmax(P - 1L, 1L)) %>%
     dplyr::group_by(region) %>%
-    do(broom::tidy(lm(GI_minus_r ~ z, data = .))) %>%
-    dplyr::ungroup() %>%
-    dplyr::filter(term == "z") %>%
-    dplyr::transmute(region, beta_LOO = estimate)
+    dplyr::summarise(
+      n_obs = dplyr::n(),
+      Sxx   = sum((z - mean(z))^2),
+      Sxy   = sum((z - mean(z)) * (GI_minus_r - mean(GI_minus_r))),
+      Syy   = sum((GI_minus_r - mean(GI_minus_r))^2),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      beta_LOO = ifelse(Sxx > 0, Sxy / Sxx, NA_real_),
+      rss      = pmax(Syy - ifelse(Sxx > 0, Sxy^2 / Sxx, NA_real_), 0),
+      se       = ifelse(n_obs > 2 & Sxx > 0, sqrt(rss / (n_obs - 2) / Sxx), NA_real_),
+      t        = beta_LOO / se,
+      p        = ifelse(is.finite(t), 2 * stats::pt(-abs(t), n_obs - 2), NA_real_)
+    ) %>%
+    dplyr::select(region, beta_LOO, se, t, p, n_obs)
+}
+
+# --- LOO contribution map × PET ----------------------------------------------
+
+loo_pet_alignment <- function(Z_collapsed, fdg_use, betas = NULL) {
+  if (is.null(betas)) betas <- region_loo_betas(Z_collapsed)
 
   beta_pet <- betas %>%
+    dplyr::select(region, beta_LOO) %>%
     dplyr::inner_join(fdg_use, by = "region")
 
   rP  <- suppressWarnings(cor(beta_pet$beta_LOO, beta_pet$w_pet, use = "pairwise"))
@@ -205,6 +255,15 @@ subject_pet_alignment <- function(Z_collapsed, fdg_use) {
   ci_s <- fisher_mean_ci(r_df$r_s, r_df$n_reg)
   ci_p <- fisher_mean_ci(r_df$r_p, r_df$n_reg)
 
+  # The Fisher interval treats the per-subject correlations as independent
+  # estimates of one quantity, so at cohort scale it collapses to a width of
+  # essentially nothing and says only that the mean is precisely estimated. It
+  # is NOT a statement about how much subjects differ from one another. The
+  # quartiles and SD below are the numbers to quote for that; report the
+  # interval only alongside them.
+  qs <- stats::quantile(r_df$r_s[is.finite(r_df$r_s)], c(0.25, 0.5, 0.75),
+                        na.rm = TRUE, names = FALSE)
+
   data.frame(
     n_subjects = sum(is.finite(r_df$r_s)),
     mean_s     = unname(ci_s["mean"]),
@@ -212,34 +271,26 @@ subject_pet_alignment <- function(Z_collapsed, fdg_use) {
     hi_s       = unname(ci_s["hi"]),
     mean_p     = unname(ci_p["mean"]),
     lo_p       = unname(ci_p["lo"]),
-    hi_p       = unname(ci_p["hi"])
+    hi_p       = unname(ci_p["hi"]),
+    sd_s       = stats::sd(r_df$r_s, na.rm = TRUE),
+    q25_s      = qs[1],
+    median_s   = qs[2],
+    q75_s      = qs[3]
   )
 }
 
 # --- PC1 loadings table (optionally sign-align to PET) ------------------------
 
-pc1_loadings_table <- function(Z_collapsed, fdg_use = NULL, align_to_pet = TRUE) {
-  M <- Z_collapsed %>%
-    tidyr::pivot_wider(names_from = region, values_from = z) %>%
-    dplyr::arrange(id) %>%
-    dplyr::select(-id) %>%
-    as.matrix()
+pc1_loadings_table <- function(Z_collapsed, fdg_use = NULL, align_to_pet = TRUE,
+                               pc1 = NULL) {
+  if (is.null(pc1)) pc1 <- region_pc1(Z_collapsed)
 
-  if (!ncol(M)) stop("No regions after collapse")
+  load <- pc1$loading
+  reg  <- pc1$region
 
-  vars <- apply(M, 2, sd, na.rm = TRUE)
-  keep <- is.finite(vars) & vars > 0
-  if (sum(keep) < 2) stop("Too few variable regions for PCA")
-
-  X <- scale(M[, keep, drop = FALSE])
-  X[is.na(X)] <- 0
-
-  p <- prcomp(X, center = FALSE, scale. = FALSE)
-
-  load <- as.numeric(p$rotation[, 1])
-  reg  <- colnames(X)
-
-  # optional: flip sign so correlation with PET is non-negative
+  # The sign of an eigenvector is arbitrary, so fix it: flip so the correlation
+  # with the map is non-negative. Without this the loadings table can change
+  # sign between runs for no substantive reason.
   if (!is.null(fdg_use)) {
     tmp <- dplyr::tibble(region = reg, loading = load) %>%
       dplyr::inner_join(fdg_use, by = "region")
@@ -247,12 +298,10 @@ pc1_loadings_table <- function(Z_collapsed, fdg_use = NULL, align_to_pet = TRUE)
     if (is.finite(rP) && align_to_pet && rP < 0) load <- -load
   }
 
-  var_expl_pc1 <- unname(p$sdev[1]^2 / sum(p$sdev^2))
-
   dplyr::tibble(
-    region           = reg,
-    pc1_loading      = load,
-    var_explained_pc1 = var_expl_pc1
+    region            = reg,
+    pc1_loading       = load,
+    var_explained_pc1 = pc1$var_explained
   )
 }
 
@@ -269,32 +318,9 @@ mean_z_per_region <- function(Z_collapsed) {
 
 # --- LOO beta map (region contribution slope) ---------------------------------
 
-loo_beta_map <- function(Z_collapsed) {
-  sub_sum <- Z_collapsed %>%
-    dplyr::group_by(id) %>%
-    dplyr::summarise(
-      S = sum(z),
-      P = dplyr::n(),
-      .groups = "drop"
-    )
-
-  Z2 <- Z_collapsed %>%
-    dplyr::inner_join(sub_sum, by = "id") %>%
-    dplyr::mutate(GI_minus_r = (S - z) / pmax(P - 1L, 1L))
-
-  betas <- Z2 %>%
-    dplyr::group_by(region) %>%
-    do(broom::tidy(lm(GI_minus_r ~ z, data = .))) %>%
-    dplyr::ungroup() %>%
-    dplyr::filter(term == "z") %>%
-    dplyr::transmute(
-      region,
-      beta_LOO = estimate,
-      se       = std.error,
-      t        = statistic,
-      p        = p.value
-    )
-
-  betas$FDR <- p.adjust(betas$p, method = "BH")
+loo_beta_map <- function(Z_collapsed, betas = NULL) {
+  if (is.null(betas)) betas <- region_loo_betas(Z_collapsed)
+  betas <- dplyr::select(betas, region, beta_LOO, se, t, p)
+  betas$FDR <- stats::p.adjust(betas$p, method = "BH")
   betas
 }
