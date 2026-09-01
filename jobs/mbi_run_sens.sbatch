@@ -6,6 +6,8 @@
 #SBATCH --output=logs/mbi_sens_%j.out
 #SBATCH --error=logs/mbi_sens_%j.err
 
+# NOTE: --output/--error above are opened by SLURM before this script runs,
+# relative to the submission directory. Run `mkdir -p logs` before sbatch.
 set -euo pipefail
 mkdir -p logs
 
@@ -28,10 +30,12 @@ export CANONICAL_OUTDIR="${CANONICAL_OUTDIR%/}"
 export PROJECT_ROOT="/path/to/mbi-pipeline"
 export MAPS_DIR="/path/to/maps"
 
-# Per-template PET file.
-# Default matches the filename produced by helpers/get_dellarosa_template.py:
-#   source-dellarosa2014_desc-fdg_space-MNI152_feature.nii.gz
-# Override ALT_PET_FILE explicitly for any other template.
+# Config the sensitivity run inherits its index parameters from. Leave unset to
+# take the config the canonical run recorded in compute_mbi/run_info.txt.
+# export CANONICAL_CFG="$PROJECT_ROOT/config_generic.yaml"
+
+# Per-template PET file. Override ALT_PET_FILE explicitly for any template not
+# listed below, or to use a different filename convention.
 case "$TEMPLATE_LABEL" in
   dellarosa2014)
     export ALT_PET_FILE="${ALT_PET_FILE:-$MAPS_DIR/source-dellarosa2014_desc-fdg_space-MNI152_feature.nii.gz}"

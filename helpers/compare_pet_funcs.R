@@ -34,9 +34,10 @@ fisher_ci <- function(r, n, conf = 0.95) {
 # Do not copy it into this file: a second implementation would let the
 # cross-template comparison validate a construction the index does not use, with
 # nothing enforcing that the two stay in step.
-if (!exists("transform_map_weights", mode = "function")) {
+if (!exists("transform_map_weights", mode = "function") ||
+    !exists("resolve_ratio", mode = "function")) {
   stop("compare_pet_funcs.R requires compute_mbi.R to be sourced first ",
-       "(transform_map_weights() not found).", call. = FALSE)
+       "(transform_map_weights() / resolve_ratio() not found).", call. = FALSE)
 }
 apply_pet_transform <- function(w, ratio = "auto", clamp_z = 3, emphasis = 1) {
   transform_map_weights(w, ratio = ratio, clamp_z = clamp_z, emphasis = emphasis)
@@ -48,6 +49,12 @@ compare_weights_regional <- function(w_canon_df, w_alt_df,
                                      drop_ventricles = TRUE) {
   stopifnot(all(c("region", "weight") %in% names(w_canon_df)))
   stopifnot(all(c("region", "weight") %in% names(w_alt_df)))
+
+  # Resolve "auto" against the CANONICAL map, so both templates are transformed
+  # on one weight scale rather than each self-scaling, and so every use of
+  # `ratio` below is a number. Callers that have already resolved it pass the
+  # number and this is a no-op.
+  ratio <- resolve_ratio(w_canon_df$weight, ratio)
 
   d <- inner_join(
     dplyr::rename(w_canon_df, w_canon = weight),

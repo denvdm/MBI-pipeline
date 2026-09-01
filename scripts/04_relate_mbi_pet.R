@@ -9,6 +9,7 @@ source("helpers/run_helpers.R")
 opt <- parse_common_args()
 cfg <- read_config(opt$config)
 
+source_local("compute_mbi.R")        # for compute_oriented(): one orientation rule
 source_local("relate_pet_funcs.R")
 
 normdev_long <- cfg$inputs$deviations_z_long %||% file.path(opt$outdir, "normdev", "deviations_z_long.txt")
@@ -35,7 +36,19 @@ if (!is.null(cfg$mbi$subvol_gate_pct))
           "using absolute 'subvol_min_mm3' = ", subvol_min_mm3, call. = FALSE)
 
 fdg_use <- prep_fdg(fdg)
-zs_gated <- gate_subvol(zs, size_df, min_mm3 = subvol_min_mm3)
+
+# Orient before anything else, with the same rule the index uses. Averaging a
+# raw `z` across modalities inside collapse_zs() would mix sign conventions the
+# moment a negatively-oriented modality (MD, RD, WMH) is in mods_use.
+zs_oriented <- compute_oriented(zs)
+n_dropped   <- dplyr::n_distinct(zs$modality) - dplyr::n_distinct(zs_oriented$modality)
+if (n_dropped > 0)
+  message(sprintf("[qc] %d modality/modalities have no defined orientation and were dropped: %s",
+                  n_dropped,
+                  paste(setdiff(unique(zs$modality), unique(zs_oriented$modality)),
+                        collapse = ", ")))
+
+zs_gated <- gate_subvol(zs_oriented, size_df, min_mm3 = subvol_min_mm3)
 Zc <- collapse_zs(zs_gated, fdg_use, mods_use = mods_use)
 
 mods_tag <- paste(mods_use, collapse = "+")

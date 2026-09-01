@@ -47,9 +47,16 @@ suppressPackageStartupMessages({
 # ------------------------------
 # Winsorizing
 # ------------------------------
-winsorize <- function(x, lower = 0.001, upper = 0.999, na.rm = TRUE) {
+# `ref` is the sample the clipping quantiles are read off. Under a
+# discovery/replication split that must be the DISCOVERY subjects only:
+# quantiles taken over everyone let held-out subjects influence the values the
+# normative models are fitted to, which is leakage in the one mechanism whose
+# purpose is a clean split. Defaults to x, so an unsplit run is unaffected.
+winsorize <- function(x, lower = 0.001, upper = 0.999, na.rm = TRUE, ref = NULL) {
   if (!is.numeric(x)) return(x)
-  q <- quantile(x, probs = c(lower, upper), na.rm = na.rm)
+  if (is.null(ref)) ref <- x
+  q <- quantile(ref, probs = c(lower, upper), na.rm = na.rm)
+  if (!all(is.finite(q))) return(x)
   x[x < q[1]] <- q[1]
   x[x > q[2]] <- q[2]
   x
@@ -108,7 +115,9 @@ fit_one_feature <- function(feat,
                             needs_icv = function(x) FALSE,
                             train_mask = NULL,
                             variance_model = TRUE,
-                            k_age_scale = 5) {
+                            k_age_scale = 5,
+                            edf_max_frac = 0.8,
+                            min_r2 = NULL) {
   # Defensive checks
   if (!feat %in% names(dt)) {
     return(list(ok = FALSE, feat = feat, msg = "feature not found"))
@@ -171,8 +180,21 @@ fit_one_feature <- function(feat,
   # Under gaulss the coefficient names of the SCALE predictor are prefixed
   # "s.1(", so "^s\\(age" continues to isolate the mean smooth. The scale
   # smooth is reported separately as edf_age_scale.
+  #
+  # edf_age is the TOTAL over the mean model's age smooths, of which
+  # sex_interact = TRUE gives one per sex level. The gate below is therefore
+  # scaled by how many there are: with a single smooth the cap is 0.8 * k_age,
+  # i.e. 8 at the default k_age = 10, unchanged. Without that scaling, turning
+  # sex_interact on makes ordinary features trip a cap set for one smooth and be
+  # dropped as degenerate.
+  # Coefficient names carry a trailing basis index (".1", ".2", ...); the stem
+  # is the smooth. Under sex_interact those stems are s(age), s(age):sexF and
+  # s(age):sexM, i.e. three age smooths each with its own k.
   nm <- names(fit$edf)
-  edf_age <- tryCatch(sum(fit$edf[grepl("^s\\(age", nm)]), error = function(e) NA_real_)
+  is_mean_age   <- grepl("^s\\(age", nm)
+  n_age_smooths <- max(1L, length(unique(sub("\\.[0-9]+$", "", nm[is_mean_age]))))
+  edf_age <- tryCatch(sum(fit$edf[is_mean_age]), error = function(e) NA_real_)
+  edf_cap <- edf_max_frac * k_age * n_age_smooths
   edf_age_scale <- if (used_variance_model) {
     tryCatch(sum(fit$edf[grepl("^s\\.1\\(age", nm)]), error = function(e) NA_real_)
   } else NA_real_
@@ -221,15 +243,33 @@ fit_one_feature <- function(feat,
   } else NA_real_
 
   # ---- degenerate-fit gate -------------------------------------------------
-  # Two failure modes, both of which produce a z-score that is not a deviation:
-  # an age smooth that has absorbed the signal (edf_age > 8 against k_age = 10),
-  # and a fit that explains essentially nothing while using almost no
-  # flexibility (edf_age < 1.5 with r2 < 0.02). Check normative_qc.txt if a
-  # feature you expected is missing from the index.
-  if (!is.finite(edf_age) || edf_age > 8 ||
-      (edf_age < 1.5 && is.finite(r2) && r2 < 0.02)) {
-    message(sprintf("[NORMATIVE] Skipping %s (edf_age=%.2f, r2=%.3f)", feat, edf_age, r2))
-    return(list(ok = FALSE, feat = feat, msg = "degenerate fit",
+  # HIGH-EDF ARM (on by default). An age smooth that has absorbed the signal
+  # produces a residual that is not a deviation. The cap is edf_max_frac * k_age
+  # per age smooth, so it scales with the basis dimension actually requested and
+  # with the number of age smooths in the mean model.
+  #
+  # LOW-R2 ARM (OFF by default; set normative.min_r2 to enable). This used to
+  # drop a feature whose fit explained almost nothing while using almost no
+  # flexibility. The reasoning does not survive inspection: a region whose
+  # morphometry barely depends on age still yields a perfectly valid z-score —
+  # essentially a standardised value — and a low r2 is a fact about the
+  # covariates, not evidence that the fit is degenerate. It matters more here
+  # than it would for a mean index, because the gate selects on age-dependence,
+  # age-dependence is itself spatially patterned, and MBI is a spatial contrast:
+  # what the arm removes is a spatially patterned subset of the feature set. It
+  # also makes the feature set an OUTCOME of model fitting rather than a
+  # specification, free to differ between the full-sample and discovery-only
+  # fits of the same cohort.
+  #
+  # Whatever is dropped, read the stage-02 drop list before quoting a count.
+  low_r2_hit <- !is.null(min_r2) && is.finite(min_r2) &&
+                edf_age < 1.5 && is.finite(r2) && r2 < min_r2
+  if (!is.finite(edf_age) || edf_age > edf_cap || low_r2_hit) {
+    why <- if (!is.finite(edf_age)) "edf not estimable"
+           else if (edf_age > edf_cap) sprintf("edf_age %.2f > cap %.2f", edf_age, edf_cap)
+           else sprintf("r2 %.3f < min_r2 %.3f at edf_age %.2f", r2, min_r2, edf_age)
+    message(sprintf("[NORMATIVE] Skipping %s (%s)", feat, why))
+    return(list(ok = FALSE, feat = feat, msg = paste("degenerate fit:", why),
                 edf_age = edf_age, r2 = r2))
   }
 

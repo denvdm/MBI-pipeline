@@ -136,13 +136,86 @@ if (!is.null(icc_file) && !is.null(icc_min)) {
     mutate(region = as.character(region), modality = as.character(modality))
   keep_icc <- icc %>% dplyr::filter(is.finite(icc), icc >= icc_min) %>%
     dplyr::select(region, modality)
-  n_before <- nrow(dplyr::distinct(zs, region, modality))
+  before_icc <- dplyr::distinct(zs, region, modality)
   zs <- zs %>% dplyr::semi_join(keep_icc, by = c("region","modality"))
+  dropped_icc <- dplyr::anti_join(before_icc, dplyr::distinct(zs, region, modality),
+                                  by = c("region","modality"))
   message(sprintf("ICC gate: %d -> %d features at ICC >= %.2f",
-                  n_before, nrow(dplyr::distinct(zs, region, modality)), icc_min))
+                  nrow(before_icc), nrow(dplyr::distinct(zs, region, modality)), icc_min))
+  # The gate is per (modality, region), so it has to be recorded per (modality,
+  # region) too. Without this the manifest labels an ICC-dropped feature by
+  # whatever happened to its region, which is the wrong fate under the wrong
+  # reason in the one file meant to be trusted without re-derivation.
+  if (nrow(dropped_icc))
+    prov <- prov %>%
+      dplyr::left_join(dropped_icc %>% dplyr::mutate(.icc_out = TRUE),
+                       by = c("modality","region")) %>%
+      dplyr::mutate(status = ifelse(is.na(status) & !is.na(.icc_out),
+                                    sprintf("dropped: ICC < %.2f", icc_min), status)) %>%
+      dplyr::select(-.icc_out)
 }
 
 # ---------------------------------------------------------------------------
+# IMPLAUSIBLE DEVIATIONS.
+#
+# Nothing upstream bounds z. Stage 02 fits on winsorised values but computes z
+# from the RAW value, deliberately — a genuinely deviant subject should keep a
+# large deviation — and `clamp_z` bounds the MAP, not the deviation. So a failed
+# segmentation enters the contrast at full weight, and because MBI is a weighted
+# sum over ~10^2 features with no single one dominating by design, one absurd
+# value dominates by accident: on a 143-feature build at N_eff 52, a single
+# feature at |z| = 56 moved that subject's index by 15 SD.
+#
+# SET TO MISSING, NOT CLIPPED. Clipping asserts a value — it says this region
+# really is z_implausible SD deviant — and the index then propagates that
+# assertion: on the same build, clipping at 5 still left a segmentation failure
+# moving the subject by 1.7 SD, and at 10 by 3.0 SD. Setting the observation to
+# NA asserts ignorance, which is the true state, and moves the subject by 0.36
+# SD, the renormalisation from dropping one feature of 143. The existing rules
+# then do the rest: coverage_thr decides whether the subject still contributes
+# that modality, required_modalities whether they are scored at all.
+#
+# CHOOSE THE BOUND OUTSIDE THE BIOLOGICAL RANGE, not at its edge. Severe atrophy
+# legitimately reaches |z| of 5 to 8 in a few regions, and those are the
+# subjects the index exists to detect. On the reference cohort the 99.9th
+# percentile of |z| is 4.17 and the 99.99th is 8.20, so a bound of 10 removes
+# only the far tail. There is no universal value: read your own |z| distribution
+# before setting one.
+z_implausible <- cfg$mbi$z_implausible %||% NULL
+
+if (!is.null(z_implausible)) {
+  z_implausible <- as.numeric(z_implausible)
+  if (!is.finite(z_implausible) || z_implausible <= 0)
+    stop("config: mbi.z_implausible must be a positive number, or absent to ",
+         "disable the rule.", call. = FALSE)
+  bad <- which(is.finite(zs$z) & abs(zs$z) > z_implausible)
+  if (length(bad)) {
+    bad_tab <- zs[bad, ] %>% dplyr::count(modality, region, name = "n_obs") %>%
+      dplyr::arrange(dplyr::desc(n_obs))
+    message(sprintf(
+      "z_implausible = %.2f: %d observation(s) set to NA, across %d subject(s) and %d feature(s) (%.5f%% of deviations)",
+      z_implausible, length(bad), dplyr::n_distinct(zs$id[bad]),
+      nrow(bad_tab), 100 * length(bad) / sum(is.finite(zs$z))))
+    cat("\nFeatures contributing implausible deviations (top 10):\n")
+    print(as.data.frame(utils::head(bad_tab, 10)), row.names = FALSE)
+    write_tsv(zs[bad, ], file.path(out_stage, "mbi_implausible_z.txt"))
+    cat("Wrote: ", file.path(out_stage, "mbi_implausible_z.txt"), "\n", sep = "")
+    zs$z[bad] <- NA_real_
+  } else {
+    message(sprintf("z_implausible = %.2f: no deviation exceeds it.", z_implausible))
+  }
+} else {
+  # No rule set. Say so if the data contains deviations no normative model can
+  # plausibly have produced, rather than letting them into the index in silence.
+  zmax <- suppressWarnings(max(abs(zs$z), na.rm = TRUE))
+  if (is.finite(zmax) && zmax > 10)
+    warning("mbi.z_implausible is not set and this cohort contains |z| up to ",
+            sprintf("%.1f", zmax), ". Nothing bounds a deviation, so a failed ",
+            "segmentation enters the contrast at full weight; see ",
+            "mbi_subject_concentration.txt for whose index it carries.",
+            call. = FALSE)
+}
+
 res <- compute_flagship_abg(
   zs = zs, fdg = fdg, sizes = size_df,
   ratio = ratio, clamp_z = clamp_z, emphasis = emphasis,
@@ -168,13 +241,22 @@ cat("Wrote: ", out_scores, "\n")
 # already absent from `zs`, so a manifest derived from `zs` would list it in
 # neither the kept nor the dropped column. Keep the pre-gate snapshot.
 # ---------------------------------------------------------------------------
-kept_regions <- res$features$kept
+# Reconcile against the FEATURES the index was actually built from, keyed on
+# (modality, region). align_feature_set() decides by region, but every other
+# gate in this stage decides by feature, so a region-level reconciliation
+# mislabels any feature dropped for a modality-specific reason.
+in_index <- res$mbi_details$weight_table %>%
+  dplyr::distinct(modality, region) %>%
+  dplyr::mutate(.in_index = TRUE)
+
 prov <- prov %>%
+  dplyr::left_join(in_index, by = c("modality","region")) %>%
   dplyr::mutate(status = dplyr::case_when(
-    !is.na(status)            ~ status,
-    region %in% kept_regions  ~ "kept",
-    TRUE                      ~ "dropped: no valid map weight or size (align_feature_set)"
-  ))
+    !is.na(status)      ~ status,
+    !is.na(.in_index)   ~ "kept",
+    TRUE                ~ "dropped: no valid map weight or size (align_feature_set)"
+  )) %>%
+  dplyr::select(-.in_index)
 
 write_tsv(prov, out_features)
 cat("Wrote: ", out_features, "\n")
@@ -199,6 +281,21 @@ if (!is.null(mc) && nrow(mc)) {
   print(as.data.frame(mc), row.names = FALSE)
   write_tsv(mc, file.path(out_stage, "mbi_modality_composition.txt"))
 }
+
+# Per-SUBJECT concentration. Answers "is anyone's index carried by one feature?",
+# which nothing else in the pipeline reports and which nothing bounds: z is
+# computed from the raw value, so a segmentation failure enters the contrast at
+# full weight. Read top_share, not max_abs_z.
+sc <- res$subject_concentration
+write_tsv(sc, file.path(out_stage, "mbi_subject_concentration.txt"))
+cat(sprintf("\nPer-subject concentration over %d subjects: top feature share median %.4f, p99 %.4f, max %.4f\n",
+            nrow(sc), stats::median(sc$top_share),
+            stats::quantile(sc$top_share, 0.99), max(sc$top_share)))
+n_dom <- sum(sc$top_share > 0.25)
+if (n_dom)
+  cat(sprintf("  %d subject(s) (%.3f%%) have >25%% of their index carried by a single feature; see mbi_subject_concentration.txt\n",
+              n_dom, 100 * n_dom / nrow(sc)))
+cat(sprintf("  largest |z| entering any subject's index: %.2f\n", max(sc$max_abs_z)))
 
 # Per-feature influence shares + N_eff, for QC and for the methods table.
 write_tsv(res$concentration$shares, out_shares)

@@ -40,11 +40,17 @@ pet_weights:
   R03: 0.70
   R04: 0.90
 
-# Index parameters (config defaults).
+# Index parameters. These mirror the shipped defaults in config_generic.yaml so
+# the example demonstrates the construction that is actually reported.
 mbi:
-  beta: 0.25
+  beta: 0               # topography, not burden. MUST stay 0 here: the toy's
+                        # `size` values are means of the raw features, so they
+                        # carry mm, mm^2 and mm^3 in one column. Any beta > 0
+                        # would weight them against each other by unit alone,
+                        # which is exactly what compute_mbi.R warns against.
   ratio: auto
   clamp_z: 3
   emphasis: 1
   coverage_thr: 0.80
+  required_modalities: ["CT", "SA", "SubVol"]
   subvol_min_mm3: 0     # synthetic sizes; keep all structures

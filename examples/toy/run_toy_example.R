@@ -76,13 +76,14 @@ mm <- cfg$modality_map %||% list(thickness = "CT", area = "SA", volume = "SubVol
 
 # index parameters (config defaults)
 mb              <- cfg$mbi %||% list()
-beta            <- mb$beta            %||% 0.25
+beta            <- mb$beta            %||% 0
 ratio           <- mb$ratio           %||% "auto"
 clamp_z         <- mb$clamp_z         %||% 3
 emphasis        <- mb$emphasis        %||% 1
 coverage_thr    <- mb$coverage_thr    %||% 0.80
 subvol_min_mm3  <- mb$subvol_min_mm3  %||% 0   # toy sizes are synthetic; 0 = keep all
 icv_modalities  <- cfg$icv_modalities %||% c("SA", "SubVol")
+required_modalities <- mb$required_modalities %||% c("CT", "SA", "SubVol")
 
 # ---- load toy inputs --------------------------------------------------
 fw <- read.delim(features_file, stringsAsFactors = FALSE, check.names = FALSE)
@@ -183,7 +184,8 @@ source(file.path(repo_root, "helpers", "compute_mbi.R"))
 res <- compute_flagship_abg(
   zs = zs, fdg = fdg, sizes = sizes,
   ratio = ratio, clamp_z = clamp_z, emphasis = emphasis,
-  beta = beta, coverage_thr = coverage_thr
+  beta = beta, coverage_thr = coverage_thr,
+  required_modalities = required_modalities
 )
 scores <- as.data.frame(res$scores)
 

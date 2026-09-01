@@ -53,7 +53,7 @@ get_orientation <- function(zs) {
 compute_oriented <- function(zs) {
   zs %>%
     mutate(s = get_orientation(.), z_oriented = s * z) %>%
-    filter(s != 0)
+    dplyr::filter(s != 0)
 }
 
 # ---- Resolving `ratio` ----------------------------------------------------
@@ -346,14 +346,32 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
     mutate(w_bar = pmax(0, w_pet) * pmax(1e-12, size))
 
   #--- coverage rule, computed per (id, modality) so subject inclusion is
-  #--- driven by per-modality data completeness rather than by the pooled total
+  #--- driven by per-modality data completeness rather than by the pooled total.
+  #
+  # The denominator is the number of features the modality HAS, not the number
+  # of rows the subject happens to have. Those coincide when the deviation table
+  # is dense — which is what stage 02 writes, one row per subject x feature with
+  # NA where a value is missing — but not when a long table is supplied through
+  # inputs.deviations_z_long in the common "one row per observed value"
+  # convention. Under that convention a row-based denominator is 1 for everyone
+  # by construction, and coverage_thr silently stops being a filter at all.
+  n_feat_mod <- zw %>%
+    dplyr::distinct(modality, region) %>%
+    dplyr::count(modality, name = "n_features_mod")
+
+  # A (subject, modality) with no usable row at all simply has no entry here;
+  # the left_join below then gives cover = NA and the filter drops it, which is
+  # the same outcome as cover = 0 without needing to materialise the full grid.
   cover <- zw %>%
-    group_by(id, modality) %>%
-    summarise(cover = mean(!is.na(z_oriented), na.rm = TRUE), .groups = "drop")
+    dplyr::filter(!is.na(z_oriented)) %>%
+    dplyr::count(id, modality, name = "n_present") %>%
+    dplyr::inner_join(n_feat_mod, by = "modality") %>%
+    dplyr::mutate(cover = n_present / n_features_mod) %>%
+    dplyr::select(id, modality, cover)
 
   zwg <- zw %>%
     left_join(cover, by = c("id", "modality")) %>%
-    filter(cover >= cfg$coverage_thr)
+    dplyr::filter(cover >= cfg$coverage_thr)
 
   # ---- REQUIRED-MODALITY GUARDRAIL ----------------------------------------
   # The coverage rule above is per (subject, modality): it decides whether a
@@ -375,7 +393,7 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
   # the data entirely is an ERROR, not a silently relaxed constraint.
   mod_count <- zwg %>%
     distinct(id, modality) %>%
-    count(id, name = "n_mod")
+    dplyr::count(id, name = "n_mod")
   mods_all <- sort(unique(zw$modality))
 
   req <- cfg$required_modalities
@@ -390,9 +408,9 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
 
     keep_ids <- zwg %>%
       distinct(id, modality) %>%
-      filter(modality %in% req) %>%
-      count(id, name = "n_req") %>%
-      filter(n_req == length(req)) %>%
+      dplyr::filter(modality %in% req) %>%
+      dplyr::count(id, name = "n_req") %>%
+      dplyr::filter(n_req == length(req)) %>%
       pull(id)
 
     n_before <- dplyr::n_distinct(zwg$id)
@@ -400,8 +418,8 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
     if (n_after < n_before && !isTRUE(cfg$quiet)) {
       short <- zwg %>%
         distinct(id, modality) %>%
-        filter(!id %in% keep_ids, modality %in% req) %>%
-        count(modality, name = "n_subj_with")
+        dplyr::filter(!id %in% keep_ids, modality %in% req) %>%
+        dplyr::count(modality, name = "n_subj_with")
       message(sprintf(
         "required_modalities: %d of %d subjects dropped for an incomplete modality set (required: %s)",
         n_before - n_after, n_before, paste(req, collapse = ", ")))
@@ -410,9 +428,9 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
       message(sprintf("required_modalities: all %d subjects have the full set (%s)",
                       n_before, paste(req, collapse = ", ")))
     }
-    zwg <- zwg %>% filter(id %in% keep_ids)
+    zwg <- zwg %>% dplyr::filter(id %in% keep_ids)
   } else {
-    tab <- mod_count %>% count(n_mod, name = "n_subjects") %>% arrange(desc(n_mod))
+    tab <- mod_count %>% dplyr::count(n_mod, name = "n_subjects") %>% arrange(desc(n_mod))
     if (nrow(tab) > 1L && !isTRUE(cfg$quiet))
       warning("compute_mbi_flagship(): mbi.required_modalities is not set and subjects ",
               "differ in how many modalities they contribute, so MBI is not the same ",
@@ -426,8 +444,8 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
                 group_by(id) %>%
                 summarise(mods = paste(sort(modality), collapse = "+"), .groups = "drop"),
               by = "id") %>%
-    filter(!is.na(mods)) %>%
-    count(mods, name = "n_subjects") %>%
+    dplyr::filter(!is.na(mods)) %>%
+    dplyr::count(mods, name = "n_subjects") %>%
     arrange(desc(n_subjects))
 
   D <- zwg %>%
@@ -438,7 +456,7 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
       D   = ifelse(den > 0, num / den, NA_real_),
       .groups = "drop"
     ) %>%
-    filter(!is.na(D)) %>%
+    dplyr::filter(!is.na(D)) %>%
     select(id, D)
 
   # per-modality scores, QC only — they are not combined into D
@@ -461,7 +479,7 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
 
   #--- QC outputs
   qc_modality <- Dm %>%
-    filter(!is.na(Dm)) %>%
+    dplyr::filter(!is.na(Dm)) %>%
     group_by(modality) %>%
     summarise(mean_Dm = mean(Dm), sd_Dm = sd(Dm), .groups = "drop")
 
@@ -492,9 +510,13 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
                  bad_subjects = bad_subjects)
   }
 
+  # D_sd travels with the scores because MBI above is standardised. Any slope
+  # fitted on the standardised column is on a different scale from the weight
+  # vectors, and index_concentration() needs the weight-vector scale; the two
+  # passes' D_sd are what converts between them.
   list(MBI = MBI, modality_scores = Dm, weight_table = weight_table,
        qc_modality = qc_modality, modality_composition = modality_composition,
-       diag = diag)
+       D_mean = D_mean, D_sd = D_sd, diag = diag)
 }
 
 
@@ -509,35 +531,39 @@ compute_mbi_flagship <- function(zs, pet_w = NULL, size_df = NULL, tune = NULL) 
 # Computed from weights only — no subject data — so candidate designs can be
 # screened before running the pipeline.
 #
-# WHICH SLOPE. e depends on b, and because W and U are nearly parallel, e is a
-# near-cancellation: a small change in b is a large relative change in the
-# contrast direction. Two slopes are available and they are not the same:
+# WHICH FRAME. W and U are the L1-normalised weights the two indices are
+# actually built from — mbi_raw = sum_r W_r z_r and gbi = sum_r U_r z_r — so a
+# slope subtracted from them has to be a slope in that same frame. Because W and
+# U are nearly parallel, e is a near-cancellation: a fractional error in b is a
+# large relative error in the contrast direction, and mixing frames is exactly
+# such an error. Everything below stays in the L1 frame.
 #
-#   b_cosine     sum(W * U), the slope under an iid-z approximation. Needs no
-#                subject data, so it is the one available at design time.
-#   b_empirical  the realised slope of lm(mbi_raw ~ gbi), which also carries
-#                the covariance structure of z. This is the slope the reported
-#                index is actually built with.
+# WHICH SLOPE. Two are available and they are not the same:
 #
-# Pass b_empirical when you have it and n_eff will be computed at the index's
-# own slope, with n_eff_cosine retained alongside for comparability. On a
-# synthetic replica of a 143-feature build the two differ by roughly 2%, so
-# this matters for reporting a figure, not for choosing a design.
+#   b_cosine     (W.U)/(U.U), the regression slope under an iid-z
+#                approximation. Needs no subject data, so it is the one
+#                available at design time.
+#   b_empirical  the realised slope of mbi_raw on gbi, which also carries the
+#                covariance structure of z. This is the slope the reported index
+#                is actually built with. It must be supplied on the SAME scale
+#                as W and U: compute_flagship_abg() standardises both scores
+#                before fitting, so it rescales the fitted slope by the ratio of
+#                the two pre-standardisation SDs before passing it here.
+#
+# Pass b_empirical when you have it and n_eff is computed at the index's own
+# slope, with n_eff_cosine retained alongside for comparability.
 index_concentration <- function(weight_table_mbi, weight_table_gbi,
                                 b_empirical = NULL) {
   key <- function(x) paste(x$modality, x$region, sep = "|")
   stopifnot(identical(sort(key(weight_table_mbi)), sort(key(weight_table_gbi))))
 
-  m <- weight_table_mbi %>% arrange(modality, region)
-  g <- weight_table_gbi %>% arrange(modality, region)
+  m <- weight_table_mbi %>% dplyr::arrange(modality, region)
+  g <- weight_table_gbi %>% dplyr::arrange(modality, region)
 
-  Wn <- m %>% mutate(W = w_bar / sum(w_bar))
-  Un <- g %>% mutate(U = w_bar / sum(w_bar))
+  W <- m$w_bar / sum(m$w_bar)
+  U <- g$w_bar / sum(g$w_bar)
 
-  W <- Wn$W / sqrt(sum(Wn$W^2))
-  U <- Un$U / sqrt(sum(Un$U^2))
-
-  b_cos  <- sum(W * U)
+  b_cos  <- sum(W * U) / sum(U * U)
   shares <- function(b) { e <- W - b * U; e^2 / sum(e^2) }
   p_cos  <- shares(b_cos)
 
@@ -553,11 +579,53 @@ index_concentration <- function(weight_table_mbi, weight_table_gbi,
     b_source      = if (use_emp) "empirical (lm slope)" else "cosine approximation",
     n_eff         = 1 / sum(p_used^2),
     n_eff_cosine  = 1 / sum(p_cos^2),
-    shares        = Wn %>% transmute(modality, region, share = p_used) %>%
-                      arrange(desc(share))
+    shares        = m %>% dplyr::transmute(modality, region, share = p_used) %>%
+                      dplyr::arrange(dplyr::desc(share))
   )
 }
 
+
+# ---- Per-subject concentration -------------------------------------------
+# index_concentration() describes the WEIGHTS: how evenly influence is spread if
+# every feature carries a typical deviation. This describes each SUBJECT'S OWN
+# score: MBI_i is proportional to sum_r e_r z_ri, so the squared contributions
+# (e_r z_ri)^2 say how much of that particular subject's index came from each
+# feature.
+#
+# It exists because nothing bounds z. Stage 02 fits on winsorised values but
+# computes z from the RAW value, deliberately — a genuinely deviant subject
+# should keep a large deviation — and `clamp_z` in the config clamps the MAP,
+# not z. The index cannot tell a real 6-SD deviation from a segmentation
+# failure, and it does not need to: a subject whose score is carried by one
+# feature is visible here whichever it is. On a synthetic build with N_eff 70, a
+# single feature pushed to |z| = 8 moved that subject's MBI by 1.6 SD, and
+# |z| = 20 moved it by 4.4 SD.
+#
+# Read top_share and n_eff_subject, not max_abs_z: a large |z| on a low-influence
+# feature is harmless, and a moderate one on a high-influence feature may not be.
+subject_concentration <- function(zs, weight_table_mbi, weight_table_gbi, b) {
+  m <- weight_table_mbi %>% dplyr::arrange(modality, region)
+  g <- weight_table_gbi %>% dplyr::arrange(modality, region)
+  e <- m %>%
+    dplyr::transmute(modality, region,
+                     e = (m$w_bar / sum(m$w_bar)) - b * (g$w_bar / sum(g$w_bar)))
+
+  compute_oriented(zs) %>%
+    dplyr::inner_join(e, by = c("modality", "region")) %>%
+    dplyr::filter(!is.na(z_oriented)) %>%
+    dplyr::mutate(c2 = (e * z_oriented)^2) %>%
+    dplyr::group_by(id) %>%
+    dplyr::summarise(
+      n_features_used = dplyr::n(),
+      top_share       = max(c2) / sum(c2),
+      n_eff_subject   = 1 / sum((c2 / sum(c2))^2),
+      top_modality    = modality[which.max(c2)],
+      top_region      = region[which.max(c2)],
+      max_abs_z       = max(abs(z_oriented)),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(dplyr::desc(top_share))
+}
 
 # ---- Wrapper: yields gbi, mbi_raw and MBI --------------------------------
 compute_flagship_abg <- function(
@@ -632,10 +700,21 @@ compute_flagship_abg <- function(
   dt$mbi <- as.numeric(scale(stats::residuals(fit)))
   b_emp  <- unname(stats::coef(fit)[2])
 
+  # Both score columns were standardised inside compute_mbi_flagship(), so
+  # b_emp is the slope between two standardised variables and equals their
+  # correlation. The contrast weights in index_concentration() are the
+  # L1-normalised weights of the UNSTANDARDISED weighted means, so the slope has
+  # to be put back on that scale before it is subtracted from them. Undoing the
+  # two standardisations is the ratio of the two passes' SDs. Without this the
+  # slope is applied in a frame it was not estimated in, and because e is a
+  # near-cancellation of two nearly parallel vectors the resulting n_eff is off
+  # by several percent.
+  b_emp_w <- b_emp * mbi_out$D_sd / gbi_out$D_sd
+
   # Concentration at the index's own realised slope, not the design-time
   # approximation; both are returned.
   conc     <- index_concentration(mbi_out$weight_table, gbi_out$weight_table,
-                                  b_empirical = b_emp)
+                                  b_empirical = b_emp_w)
   w_ratio  <- realised_weight_ratio(mbi_out$weight_table$w_pet)
   r2_raw_g <- suppressWarnings(stats::cor(dt$mbi_raw, dt$gbi,
                                           use = "pairwise.complete.obs")^2)
@@ -647,8 +726,12 @@ compute_flagship_abg <- function(
     w_ratio, clamp_z, emphasis, beta, conc$b, r2_raw_g,
     conc$n_eff, conc$b_cosine, conc$n_eff_cosine))
 
+  subj_conc <- subject_concentration(zs, mbi_out$weight_table,
+                                     gbi_out$weight_table, b_emp_w)
+
   list(
     scores        = dt[, c("id","mbi_raw","gbi","mbi")],
+    subject_concentration = subj_conc,
     mbi_details   = mbi_out,
     gbi_details   = gbi_out,
     features      = list(kept = al$kept, dropped = al$dropped, n_kept = length(al$kept)),

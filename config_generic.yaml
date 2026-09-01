@@ -52,6 +52,55 @@ inputs:
   # Activates the ICC gate in stage 03 together with mbi.icc_min.
   # feat_icc: "/path/to/feature_icc.tsv"
 
+split:
+  # Discovery/replication assignment. Deterministic in the subject id, so a
+  # subject's HALF never changes when the cohort grows, and there is no split
+  # file to go stale. Two values fully specify it; extras/make_split.R writes it
+  # out for downstream analyses, and stage 02 recomputes the same assignment
+  # rather than reading that file, so the two cannot fall out of step.
+  #
+  # WHY NOT A STRATIFIED DRAW. sample() reassigns every subject whenever N
+  # changes, so a regenerated split moves people between halves; and its random
+  # stream changed at R 3.6, so a seed does not pin a split across environments.
+  # Freezing the draw in a file stops the movement but starts the drift: under
+  # an id-membership rule every subject added afterwards silently lands on the
+  # held-out side, and the realised discovery fraction falls with each cohort
+  # refresh. Hashing the id removes both failure modes. What it gives up is
+  # stratification; make_split.R reports the realised balance by sex and age
+  # decile so that is checked rather than assumed.
+
+  mode: none            # none | hash. "hash" enables the assignment.
+
+  label: ""             # names THIS split. Changing it draws a new one,
+                        # which is its only purpose and not a tuning knob: a
+                        # label changed after outcomes have been inspected is a
+                        # split chosen against a result. Record any change in
+                        # extras/SELECTION_RULE.md.
+
+  discovery_frac: 0.7   # target share in the discovery half.
+
+  fit_on: all           # all | discovery. WHO THE NORMATIVE MODELS ARE FITTED
+                        # ON, and nothing else: z-scores are computed for every
+                        # subject either way, everyone who clears the inclusion
+                        # rules is scored, and the index is built identically
+                        # for both halves.
+                        #
+                        # "all" is the default and is a considered choice. The
+                        # normative model contains no outcome — only age, sex,
+                        # scanner and optionally ICV — so fitting it on the
+                        # whole cohort is not leakage with respect to any later
+                        # association test, it is simply the more precise
+                        # estimate of the norms. The discovery/replication logic
+                        # belongs where an outcome enters, which is downstream
+                        # of this pipeline; that is what the written assignment
+                        # is for.
+                        #
+                        # "discovery" is a SENSITIVITY ARM: it asks whether the
+                        # deviations depend on who the norms were built from. It
+                        # CHANGES EVERY INDEX VALUE, so run it into its own
+                        # output directory and do not mix its scores with the
+                        # reported ones.
+
 normative:
   k_age: 10
   use_site_RE: true
@@ -79,6 +128,27 @@ normative:
                           # curve does not support 10 basis functions at this N,
                           # and over-flexible scale models are the usual cause of
                           # gaulss convergence failures.
+
+  edf_max_frac: 0.8       # DEGENERATE-FIT GATE, high-edf arm. A feature is
+                          # dropped when the total edf of the mean model's age
+                          # smooth(s) exceeds edf_max_frac * k_age per smooth —
+                          # 8.0 at the defaults. Catches an age smooth that has
+                          # absorbed the signal, whose residual is no longer a
+                          # deviation.
+
+  # min_r2: 0.02          # DEGENERATE-FIT GATE, low-r2 arm. OFF unless set.
+                          # When set, also drops a feature with edf_age < 1.5
+                          # and r2 below this value. Off by default because a
+                          # region whose morphometry barely depends on age still
+                          # yields a valid z-score, and a low r2 is a fact about
+                          # the covariates rather than evidence of a degenerate
+                          # fit. It matters here more than it would for a mean
+                          # index: the arm selects on age-dependence, which is
+                          # spatially patterned, and MBI is a spatial contrast,
+                          # so what it removes is a spatially patterned subset
+                          # of the feature set — and the feature set becomes an
+                          # outcome of model fitting rather than a
+                          # specification.
 
   # Modalities that should include ICV as a covariate if icv is available
   icv_modalities: ["SA", "SubVol"]
@@ -171,6 +241,38 @@ mbi:
                           # index when SubVol is missing and r = 0.77 when CT is.
                           # null scores everyone who clears coverage_thr on at
                           # least one modality; stage 03 then warns.
+
+  # z_implausible: 10     # OFF unless set. A deviation whose magnitude exceeds
+                          # this is set to MISSING before aggregation, not
+                          # clipped. Nothing else bounds z: stage 02 computes it
+                          # from the RAW value by design, and clamp_z above
+                          # bounds the MAP rather than the deviation, so a failed
+                          # segmentation otherwise enters the contrast at full
+                          # weight. On a 143-feature build at N_eff 52 a single
+                          # feature at |z| = 56 moved that subject's index by
+                          # 15 SD.
+                          #
+                          # MISSING RATHER THAN CLIPPED, because clipping asserts
+                          # a value the data does not support and the index then
+                          # propagates it: on the same build, clipping at 5 still
+                          # left the artefact moving the subject by 1.7 SD and at
+                          # 10 by 3.0 SD, where setting it to NA moved them by
+                          # 0.36 SD — the renormalisation from dropping one
+                          # feature of 143. coverage_thr and required_modalities
+                          # then decide whether the subject is still scored.
+                          #
+                          # SET IT OUTSIDE THE BIOLOGICAL RANGE, NOT AT ITS EDGE,
+                          # and set it from the SIGN STRUCTURE of your own tail
+                          # rather than from a percentile. Real pathology lowers
+                          # thickness, area and volume, so genuine extreme
+                          # deviations are NEGATIVE; an artefact tail is usually
+                          # one-sided the other way. On the reference cohort the
+                          # fraction of the tail that is negative falls from 0.42
+                          # above |z| = 5 to 0.02 above 10 and 0.00 above 15, so
+                          # a bound of 10 cuts a population that is ~96%
+                          # artefact while a bound of 6 would be ~66% real
+                          # severe atrophy. Stage 03 warns if this is unset and
+                          # the cohort contains |z| above 10.
 
   subvol_min_mm3: 1000    # drop SubVol structures below this volume (mm^3);
                           # single source of truth for stages 03, 04 and the

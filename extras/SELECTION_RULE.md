@@ -339,6 +339,208 @@ engage on both tails.
 
 ---
 
+## Decision 8 — 2026-08-31 — N_eff corrected to the index's own frame. NO INDEX VALUE MOVES
+
+**Decided.** `index_concentration()` computes the contrast weights, `N_eff` and
+the influence shares in the L1-normalised frame the index is built in, and the
+empirical slope is converted onto that frame before it is used. The figures in
+Decision 2 are superseded by the values stage 03 reports at pipeline v0.4.1.
+
+**Grounds.** `mbi_raw` and `gbi` are weighted means with L1-normalised weights,
+so the contrast is `e = W − b·U` with `W` and `U` on that scale and `b` the slope
+between the two unstandardised means. Two things were off. The score columns are
+standardised before the slope is fitted, so the fitted `b` was a correlation
+rather than a slope on the weight scale; and `shares()` operated on L2-normalised
+copies of `W` and `U`, rescaling the second term by `‖W‖/‖U‖`. Because `W` and
+`U` are nearly parallel, `e` is a near-cancellation and a sub-percent error in
+the effective slope moves the shares by several percent.
+
+The design-time figure was never affected: under the cosine slope the two frames
+are proportional, so `n_eff_cosine` and its share vector were already correct.
+Only the figure quoted at the realised slope moves.
+
+**Effect.** Diagnostic only. `mbi_raw`, `gbi` and `mbi` are bit-identical before
+and after; verified on synthetic data, where the corrected `N_eff` and top share
+now agree exactly with the contrast recomputed by hand from the index's own
+weights, and sit within 0.15% of the cosine figure rather than several percent
+above it. Stage 03 must be re-run once to regenerate `run_info.txt` and
+`mbi_influence_shares.txt`; nothing downstream of the scores changes.
+
+**Figures to quote:** those printed by stage 03 at v0.4.1 for the reported
+build, and the corresponding sensitivity strip from `extras/sweep_emphasis.R`.
+Decision 6's concentration table is to be reissued from that rerun; the ordering
+it rests on — `N_eff` falling monotonically with `emphasis`, largest share
+rising — is unchanged.
+
+---
+
+## Decision 9 — 2026-08-31 — the discovery/replication split is defined in the config. NO INDEX VALUE MOVES
+
+**Decided.** The split is a deterministic function of the subject identifier and
+a label, set in the `split:` block. `extras/make_split.R` writes the assignment
+and its realised balance; stage 02 recomputes it rather than reading it.
+`split.fit_on` defaults to `all`, so the normative models continue to be fitted
+on every subject and no index value moves. A `TRAIN_IDS` path that does not
+exist is an error rather than a silent fallback.
+
+**Grounds.** The previous arrangement had two failure modes, both silent.
+
+- *The split could simply not happen.* It was enabled by an environment
+  variable, and an unset or mistyped `TRAIN_IDS` fitted the normative models on
+  the whole cohort with no error and one line in a log.
+- *A frozen split drifts.* Under an `id %in% train_ids` rule, every subject
+  added to the cohort after the file was written falls to the held-out side
+  without appearing in either list, so the realised discovery fraction declines
+  with each cohort refresh and nothing reports it. On a synthetic cohort, a file
+  covering a third of the subjects yielded a realised discovery fraction of
+  0.332 against a nominal 0.6; that is now reported and warned about.
+
+Regenerating the split each run would replace both with a worse problem:
+`sample()` reassigns existing subjects whenever N changes, so a redrawn split
+moves people between halves — measured at 23,559 of 95,000 subjects moving under
+a cohort growth from 95,000 to 110,000 — and its random stream changed at R 3.6,
+so a seed does not pin a split across environments. Hashing the identifier moves
+nobody and is reproducible across versions and platforms; both are checked in
+`extras/verify_split.R`.
+
+What hashing gives up is stratification. `make_split.R` therefore reports the
+realised discovery fraction by sex and age decile rather than assuming it: at
+n = 95,000 the realised fraction sat within 0.004 of the requested one and every
+decile within 0.003 of even. At small N, or where exact balance is required, an
+external assignment supplied through `TRAIN_IDS` remains available.
+
+**On `fit_on`.** The default is to fit the norms on the whole cohort. The
+normative model contains no outcome — only age, sex, scanner and optionally ICV
+— so fitting it on everyone is not leakage with respect to any later association
+test, and it is the more precise estimate of the norms. The discovery/replication
+distinction belongs where an outcome enters, which is downstream of this
+pipeline; that is what the written assignment is for. `fit_on: discovery` is a
+sensitivity arm, and it changes every index value.
+
+**Effect on the index: none** at the shipped default. Verified on synthetic
+data: `deviations_z_long.txt` is byte-identical with the `split:` block absent
+and with a split defined at `fit_on: all`. Under `fit_on: discovery` the
+deviations correlate 0.998 with the full-sample fit and the fitted feature set
+differs — a reminder that the stage-02 feature set is an outcome of model
+fitting, not a specification.
+
+**On changing the label.** The label identifies the split. Changing it draws a new
+one, which is its only purpose; a label changed after outcomes have been inspected
+is a split chosen against a result. Any change is recorded here as a dated entry.
+
+---
+
+## Decision 10 — 2026-08-31 — low-r2 arm of the degenerate-fit gate removed; per-subject concentration reported. MAY CHANGE THE FEATURE SET
+
+**Decided.** The degenerate-fit gate keeps its high-edf arm, now expressed as
+`normative.edf_max_frac * k_age` per age smooth (0.8 * 10 = 8.0, unchanged at
+the defaults). The low-r2 arm — drop a feature with `edf_age < 1.5` and
+`r2 < 0.02` — is OFF unless `normative.min_r2` is set. Stage 03 additionally
+writes `mbi_subject_concentration.txt`.
+
+**Grounds, low-r2 arm.** A region whose morphometry barely depends on age still
+yields a valid z-score; a low r2 is a fact about the covariates, not evidence
+that the fit is degenerate. The arm therefore removed features for having a weak
+age effect. That matters more here than it would for a mean index: the arm
+selects on age-dependence, age-dependence is spatially patterned, and MBI is a
+spatial contrast, so what it removed was a spatially patterned subset of the
+feature set. It also made the feature set an OUTCOME of model fitting rather
+than a specification — free to differ between the full-sample and
+discovery-only fits of the same cohort, which is exactly the comparison the
+split now invites.
+
+**Grounds, per-subject concentration.** `index_concentration()` describes the
+weights under a typical deviation; nothing described a given subject's own
+score. Nothing bounds z either: stage 02 fits on winsorised values but computes
+z from the raw value, deliberately, and `clamp_z` clamps the map rather than z.
+On a synthetic build at N_eff 70, forcing a single feature to |z| = 8 moved that
+subject's MBI by 1.6 SD and |z| = 20 moved it by 4.4 SD. The new file reports,
+per subject, the largest single-feature share of their own index, the effective
+number of features behind it, and the feature responsible, so a score carried by
+one parcel is visible rather than inferred. No clamp is applied: the diagnostic
+comes first, and any bound would be a further dated decision.
+
+**Effect on the index.** The gate change can alter which features enter, and
+therefore every score. On the reference cohort the low-r2 arm never fired — all
+160 features fitted, maximum edf_age 6.40 against a cap of 8 — so removing it
+leaves that run unchanged; it is recorded here because it will not necessarily
+be dormant under the discovery-only fit. The concentration file is a report and
+changes nothing.
+
+---
+
+## Decision 11 — 2026-08-31 — implausible deviations are set to missing, not clipped
+
+**Decided.** `mbi.z_implausible` sets a magnitude above which a deviation is
+treated as MISSING before aggregation. It is off unless set. `coverage_thr` and
+`required_modalities` then decide whether the affected subject still contributes
+that modality and whether they are scored at all. Stage 03 writes the removed
+observations to `mbi_implausible_z.txt`, and warns when the rule is unset and the
+cohort contains `|z|` above 10.
+
+**Grounds.** Nothing bounded a deviation. Stage 02 computes z from the raw rather
+than the winsorised value, deliberately — a genuinely deviant subject should keep
+a large deviation — and `clamp_z` bounds the map, not z. On the reference cohort
+the `|z|` distribution is 2.76 at the 99th percentile, 4.17 at the 99.9th, 8.20
+at the 99.99th, and 55.86 at the maximum. No morphometric quantity is 56 standard
+deviations from its normative expectation; that is a segmentation failure. And
+because MBI is a weighted sum over ~143 features with no single one dominating by
+design, one absurd value dominates by accident: on a 143-feature synthetic build
+at N_eff 52, a single feature at `|z|` = 56 moved that subject's index by 15 SD.
+
+**Missing rather than clipped.** Clipping asserts a value the data does not
+support — that the region really is z_implausible SD deviant — and the index then
+propagates that assertion. On the same build, clipping at 5 still left the
+artefact moving the subject by 1.7 SD and clipping at 10 by 3.0 SD, where setting
+the observation to NA moved them by 0.36 SD, which is the renormalisation from
+dropping one feature of 143. Ignorance is the true state of a failed
+segmentation, and the existing inclusion rules already handle it.
+
+**Bound used: `mbi.z_implausible = 10`.** Fixed on the sign structure of the
+cohort's own tail, before any outcome was consulted.
+
+For CT, SA and SubVol the orientation is +1, so real pathology — atrophy, tissue
+loss — produces NEGATIVE deviations. The observed tail points the other way:
+
+| bound | observations | fraction negative |
+|---|---|---|
+| 5 | 6,795 | 0.416 |
+| 6 | 3,522 | 0.328 |
+| 8 | 1,585 | 0.115 |
+| 10 | 1,020 | 0.019 |
+| 15 | 435 | 0.000 |
+
+A tail that is 98% one-sided above 10 and entirely one-sided above 15 is a
+mechanism, not a distribution. Treating the real component as symmetric — the
+assumption most favourable to a LOW bound, since real deviations are more likely
+atrophy-dominant and therefore negative — the real part is about twice the
+negative count, which gives the proportion of each cut that is artefact: 34% at a
+bound of 6, 77% at 8, 96% at 10. A bound of 6 would discard roughly 1,155
+negative observations, plausibly real severe atrophy in about a thousand
+subjects, which is a directional bias against exactly the subjects the index
+exists to detect. A bound of 10 removes 1,020 of 14,981,138 deviations (0.007%)
+and costs two subjects a modality under `coverage_thr`.
+
+**What the artefact is.** Not failed reconstructions. Above a bound of 10, no
+(subject, region) pair is affected in both CT and SA, the median affected subject
+has ONE affected feature, and every one of the eight worst features by rate is
+surface area in a small medial parcel — posterior and isthmus cingulate,
+parahippocampal, caudal anterior cingulate, paracentral — bilaterally in 251
+cases. That is a parcel-boundary problem in cortical surface area near the medial
+wall, not a subject-level QC failure. It is recorded rather than acted on beyond
+the bound: excluding those parcels by identity is what Decision 5 rules out, and
+within-parcel dispersion and the ICC gate remain the outcome-blind instruments if
+a region-level exclusion is ever wanted.
+
+There is no universal value and none is shipped in the generic config: read the
+cohort's own distribution and its sign structure before setting one.
+
+**Effect on the index.** None unless set. When set, it changes the scores of the
+affected subjects only, and the count and identity of every removed observation
+is written out rather than absorbed.
+
+---
+
 ## Where the parameters now stand
 
 | parameter | status |

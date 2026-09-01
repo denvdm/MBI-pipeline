@@ -62,6 +62,21 @@ echo "[OK] PET done"
 echo
 
 # -----------------------------
+# Discovery/replication split
+# -----------------------------
+# Writes the assignment when split.mode is set and exits quietly when it is not,
+# so this step is safe to leave in the driver unconditionally. It does not gate
+# what stage 02 fits on: stage 02 recomputes the same assignment from the same
+# two config values, so the file cannot fall out of step with the run. The file
+# is for the phenotypic and genetic analyses downstream of this pipeline.
+echo "[STEP] Discovery/replication split"
+Rscript "$PROJECT_ROOT/extras/make_split.R" \
+  -c "$CFG" -o "$OUTDIR" --overwrite \
+  > "$OUTDIR/logs/01b_split.log" 2>&1
+echo "[OK] Split step done"
+echo
+
+# -----------------------------
 # Normative deviations
 # -----------------------------
 echo "[STEP] Normative deviations"
@@ -126,7 +141,7 @@ echo "[DONE] All steps finished. Outputs in: $OUTDIR"
 #
 # To run manually (after editing paths):
 #
-#   bash pipeline/extras/prep_petmap.sh
+#   bash extras/prep_petmap.sh
 #
 # Outputs are written to MAPS_DIR and used by later stages.
 # ------------------------------------------------------------

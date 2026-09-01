@@ -8,14 +8,17 @@ suppressPackageStartupMessages({
 
 # --- column pickers / guards --------------------------------------------------
 
+# The index is built on ORIENTED deviations, so the QC that is meant to
+# describe the index has to be too. A raw `z` column is not interchangeable with
+# `z_oriented`: for MD, RD and WMH the sign is reversed, and averaging the two
+# conventions inside collapse_zs() would cancel signal rather than summarise it.
+# Stage 04 applies compute_oriented() before calling anything here; refuse the
+# raw column rather than silently accepting it.
 pick_z_col <- function(zs) {
-  if ("z_oriented" %in% names(zs)) {
-    "z_oriented"
-  } else if ("z" %in% names(zs)) {
-    "z"
-  } else {
-    stop("Need zs$z_oriented or zs$z")
-  }
+  if ("z_oriented" %in% names(zs)) return("z_oriented")
+  stop("relate_pet_funcs.R needs an oriented deviation column. Apply ",
+       "compute_oriented() from helpers/compute_mbi.R before calling this.",
+       call. = FALSE)
 }
 
 prep_fdg <- function(fdg) {
@@ -35,11 +38,11 @@ prep_fdg <- function(fdg) {
     dplyr::filter(is.finite(w_pet), w_pet > 0)
 }
 
-# NOTE: w_pet here is the RAW map value, not the winsorised/normalised/^gamma
-# vector that enters the index. Spearman correlations are unaffected (monotone
-# transform); reported Pearson values describe alignment with the biological
-# map itself rather than with the transformed weights. Intentional, but state
-# it wherever these numbers are reported.
+# NOTE: w_pet here is the RAW map value, not the transformed weight vector that
+# enters the index. Spearman correlations are unaffected (monotone transform);
+# reported Pearson values describe alignment with the biological map itself
+# rather than with the transformed weights. Intentional, but state it wherever
+# these numbers are reported.
 
 # --- Fisher z CIs -------------------------------------------------------------
 
@@ -70,12 +73,11 @@ fisher_mean_ci <- function(r_vec, n_vec, conf = 0.95) {
 # --- SubVol gate + collapse to (id,region) once ------------------------------
 
 gate_subvol <- function(zs, size_df, min_mm3 = 1000) {
-  # ABSOLUTE volume threshold, replacing the previous within-SubVol quantile.
-  # The quantile version was recomputed over whatever SubVol set survived
-  # upstream filtering, so dropping a region for unrelated reasons silently
-  # shifted which OTHER structures were gated out. An absolute cut is invariant
-  # to that, and keeps this QC stage gated identically to stage 03 regardless
-  # of the order in which filters are applied.
+  # ABSOLUTE volume threshold (mm^3), the same gate stage 03 applies and read
+  # from the same config key. Being absolute rather than a quantile, it is
+  # invariant to upstream region filtering, so this gate and the map-validity
+  # filter commute and the QC is gated identically to the index regardless of
+  # the order in which filters are applied.
   keep_sub <- size_df %>%
     dplyr::filter(modality == "SubVol") %>%
     dplyr::filter(is.finite(size), size >= min_mm3) %>%
@@ -183,9 +185,8 @@ pc_pet_alignment <- function(Z_collapsed, fdg_use, mods_tag, pc1 = NULL) {
 # Closed form rather than one lm() per region. This is a simple bivariate
 # regression, so the slope is Sxy/Sxx and the standard error follows from the
 # residual sum of squares — algebraically identical to lm(), and verified equal
-# to it to ~1e-15 on the slope, standard error, t and p. The previous version
-# One lm() per region inside dplyr::do() costs a full model fit over every
-# subject, and stage 04 needs these betas in two places.
+# to it to ~1e-15 on the slope, standard error, t and p. Stage 04 needs these
+# betas in two places, over every subject, so the saving is worth stating.
 region_loo_betas <- function(Z_collapsed) {
   sub_sum <- Z_collapsed %>%
     dplyr::group_by(id) %>%

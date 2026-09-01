@@ -7,6 +7,8 @@
 #SBATCH --output=logs/mbi_%j.out
 #SBATCH --error=logs/mbi_%j.err
 
+# NOTE: --output/--error above are opened by SLURM before this script runs,
+# relative to the submission directory. Run `mkdir -p logs` before sbatch.
 set -euo pipefail
 
 mkdir -p logs

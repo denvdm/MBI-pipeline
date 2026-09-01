@@ -95,8 +95,9 @@ scripts/   Command-line entrypoints for each pipeline stage.
 helpers/   Reusable functions sourced by scripts (normative modelling, map
            extraction, aggregation, QC).
 extras/    Optional utilities: FreeSurfer-table adapter, PET-map prep,
-           parameter sensitivity sweep, split-half reliability, invariance
-           verification, region centroids.
+           discovery/replication split, parameter sensitivity sweep, split-half
+           reliability, invariance/normative/split verification, region
+           centroids.
 jobs/      Example SLURM batch scripts for HPC systems.
 examples/  Toy example for smoke-testing.
 ```
@@ -133,7 +134,11 @@ for excluding a region — preferable to excluding regions by identity.
 **Script:** `scripts/02_run_normdevs.R` · **Helpers:** `helpers/normative_modeling.R`
 
 Fits region-wise GAM normative models (mgcv, REML) and emits deviation z-scores
-with QC summaries. The default is a **location-scale** model (`gaulss`): both the
+with QC summaries. A feature is dropped only when its age smooth has absorbed
+the signal (`normative.edf_max_frac * k_age` per age smooth). The former low-r2
+arm is off unless `normative.min_r2` is set: a region whose morphometry barely
+depends on age still yields a valid z-score, and dropping it removed a spatially
+patterned subset of a spatial contrast. The default is a **location-scale** model (`gaulss`): both the
 conditional mean and the conditional spread are modelled as functions of age,
 sex and scanner, so each subject is scored against their own expected spread.
 
@@ -143,8 +148,10 @@ and the variance-by-age slope differs between regions, that inflation is
 *spatially patterned* — and spatially patterned inflation of z is arithmetically
 indistinguishable from genuine deviation topography.
 
-Optional discovery/replication split via the `TRAIN_IDS` environment variable;
-models are fitted on the training subjects and z-scores computed for everyone.
+Optionally fits on the discovery half only (`split.fit_on: discovery`, or an
+external list via `TRAIN_IDS`); z-scores are computed for everyone either way.
+A `TRAIN_IDS` path that does not exist is now an error rather than a silent
+fallback to fitting on the whole cohort.
 
 **Key outputs:**
 
@@ -168,6 +175,17 @@ between "features defined" and "features in the index" is always readable off a
 file rather than reconstructed by hand. It also writes per-feature **influence
 shares** and `N_eff` (inverse Herfindahl on the contrast weights) — the single
 most useful diagnostic of whether a handful of regions is driving the index.
+`N_eff` counts *features*, not anatomical locations: a cortical region enters
+twice, through CT and through SA, carrying the same map weight both times.
+
+It also writes `mbi_subject_concentration.txt`: per subject, the largest
+single-feature share of their own index, the effective number of features behind
+it, and the feature responsible. Nothing bounds `z` — stage 02 computes it from
+the raw value by design, and `clamp_z` clamps the map rather than the deviation
+— so a segmentation failure enters the contrast at full weight. On a synthetic
+build at `N_eff` 70, one feature forced to `|z| = 8` moved that subject's MBI by
+1.6 SD. Read `top_share`, not `max_abs_z`: a large deviation on a low-influence
+feature is harmless, a moderate one on a high-influence feature may not be.
 
 **Key output:** `out/compute_mbi/mbi_flagship_scores.txt`, columns
 `id | mbi_raw | gbi | mbi`
@@ -204,7 +222,10 @@ about the MRI than about the map being tested.
 
 **Workflow:** run the pipeline with each map (`extras/prep_petmap_alt.sh`
 prepares an alternative atlas/GM pair), then run this stage.
-`scripts/run_sens_all.sh` is a reusable driver.
+`scripts/run_sens_all.sh` is a reusable driver; it builds its config by
+inheriting every index parameter from the canonical run, because a sensitivity
+run built at different parameters from the run it is compared against measures
+the parameters rather than the map.
 
 **Key outputs:** `out/compare/`
 
@@ -226,7 +247,19 @@ mbi:
   coverage_thr: 0.80
   required_modalities: ["CT", "SA", "SubVol"]
   subvol_min_mm3: 1000
+  # z_implausible: 10   # optional; see below
 ```
+
+**`z_implausible`** treats a deviation above this magnitude as MISSING, not
+clipped, before aggregation. Nothing else bounds `z` — stage 02 computes it from
+the raw value by design and `clamp_z` bounds the map — so a failed segmentation
+otherwise enters the contrast at full weight, and because the index spreads
+influence deliberately thinly, one absurd value dominates by accident. Clipping
+does not fix that: it asserts a value the data does not support, and on a
+143-feature build an artefact clipped at 5 still moved its subject by 1.7 SD,
+against 0.36 SD when the observation was dropped instead. Set the bound outside
+the biological range rather than at its edge — severe atrophy reaches `|z|` of 5
+to 8 legitimately — and read your own distribution first.
 
 **`emphasis`** applies `u -> sign(u) * |u|^emphasis` before the weight mapping.
 At the default of 1 the transform is inactive and the weights are affine in the
@@ -256,8 +289,52 @@ Report `emphasis ∈ {1, 2, 3}` and `beta ∈ {0, 1}` as a sensitivity strip
 sensitivity, it does not select.
 
 Keys the pipeline does not read — `pooling`, `map_method`, `alpha`,
-`alpha_theta`, `gamma`, `winsor_q`, `subvol_gate_pct` — are rejected by stage 03
-with a warning, so a config always documents what actually ran.
+`alpha_theta`, `gamma`, `winsor_q` — are rejected by stage 03 with a warning, as
+is `subvol_gate_pct`, so a config always documents what actually ran.
+
+---
+
+## Discovery and replication
+
+The `split:` block assigns every subject to a discovery or replication half.
+The assignment is a deterministic function of the subject identifier and a short
+label naming the split,
+which buys the two properties a split has to have:
+
+- **It does not move.** Adding subjects leaves every existing assignment
+  untouched. A stratified redraw does not: `sample()` reshuffles everyone when
+  N changes, and its random stream changed at R 3.6, so a seed does not pin a
+  split across environments.
+- **It does not go stale.** There is no file to regenerate. Freezing a draw in a
+  file stops the movement but starts a subtler failure: under an `id %in%
+  train_ids` rule every subject added afterwards silently lands on the held-out
+  side, and the realised discovery fraction falls with each cohort refresh.
+
+`extras/make_split.R` writes the assignment for the analyses that consume it,
+together with the realised balance by sex and age decile — what stratification
+would have imposed, reported instead. Stage 02 recomputes the same assignment
+from the same two config values rather than reading that file, so the two cannot
+fall out of step.
+
+**What the split does and does not control here.** `split.fit_on` decides who
+the normative models are fitted on, and nothing else. Every subject is scored
+either way and the index is built identically for both halves. The default is
+`all`, deliberately: the normative model contains no outcome, only age, sex,
+scanner and optionally ICV, so fitting it on the whole cohort is not leakage with
+respect to a later association test — it is the more precise estimate of the
+norms. Discovery/replication logic belongs where an outcome enters, downstream
+of this pipeline, which is what the written assignment is for. `fit_on:
+discovery` is a sensitivity arm asking whether the deviations depend on who the
+norms were built from; it changes every index value, so give it its own output
+directory.
+
+`split.label` is just a fixed string naming the split — anything stable and
+descriptive, e.g. `"mbi-2026a"`. Changing it draws a different split. That is its only purpose and it is not
+a tuning knob — a label changed after outcomes have been inspected is a split
+chosen against a result. Record any change in `extras/SELECTION_RULE.md`. Stage
+02 records the mode, label, requested and realised fractions and a checksum of
+the discovery set in `run_info.txt`, so whether two runs used the same split is
+a string comparison.
 
 ---
 
@@ -326,13 +403,15 @@ and asserted again before residualisation. A region carried in `GBI` but not in
 | `extras/reliability_splithalf.R` | Does the contrast direction carry signal? Builds the index from disjoint hemispheres and correlates the two. |
 | `extras/sweep_emphasis.R` | How much does the result depend on `emphasis` and `beta`? |
 | `extras/region_centroids.R` | Inter-region distances, for spatial-autocorrelation-preserving nulls. |
-| `extras/make_split.R` | Stratified discovery/replication split, written in the format stage 02's `TRAIN_IDS` hook expects. |
+| `extras/make_split.R` | Writes the discovery/replication assignment and its realised balance. |
+| `extras/verify_split.R` | Does the assignment give the requested fraction, spread subjects evenly, and stay fixed as the cohort grows? |
 
 The two `verify_*` scripts run standalone on synthetic data and need no cohort:
 
 ```bash
 Rscript extras/verify_invariance.R
 Rscript extras/verify_normative.R
+Rscript extras/verify_split.R
 Rscript examples/toy/run_toy_example.R
 ```
 

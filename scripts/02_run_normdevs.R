@@ -45,6 +45,19 @@ sex_interact <- isTRUE(cfg$normative$sex_interact %||% FALSE)
 variance_model <- isTRUE(cfg$normative$variance_model %||% TRUE)
 k_age_scale    <- cfg$normative$k_age_scale %||% 5
 
+# Degenerate-fit gate. The high-edf arm is always on; the low-r2 arm is off
+# unless normative.min_r2 is set. See helpers/normative_modeling.R for why the
+# low-r2 arm is not a default.
+edf_max_frac <- cfg$normative$edf_max_frac %||% 0.8
+min_r2       <- cfg$normative$min_r2       %||% NULL
+if (!is.null(min_r2) && (!is.finite(as.numeric(min_r2)) || as.numeric(min_r2) < 0))
+  stop("config: normative.min_r2 must be a non-negative number, or absent to ",
+       "disable the low-r2 arm of the degenerate-fit gate.", call. = FALSE)
+cat(sprintf("[normative] degenerate-fit gate: edf_age > %.2f x k_age per age smooth%s\n",
+            edf_max_frac,
+            if (is.null(min_r2)) "; low-r2 arm OFF"
+            else sprintf("; low-r2 arm ON at r2 < %.3f", as.numeric(min_r2))))
+
 cat(sprintf("[normative] model = %s (k_age = %d%s)\n",
             if (variance_model) "location-scale, mgcv gaulss" else "location-only, gaussian",
             k_age,
@@ -145,19 +158,91 @@ dt <- dt[, unique(keep_cols)]
 dt$sex <- as.factor(dt$sex)
 dt$scanner <- as.factor(dt$scanner)
 
-# -----------------------------
-# Optional: discovery/replication split
-# If TRAIN_IDS is set, normative models are fit on those IDs only.
-# Z-scores are still computed for ALL subjects.
-# -----------------------------
-train_ids_file <- Sys.getenv("TRAIN_IDS", "")
-train_mask <- rep(TRUE, nrow(dt))
+# ---------------------------------------------------------------------------
+# Discovery/replication split.
+#
+# WHAT IT CONTROLS HERE: who the normative models are FITTED on. Nothing else.
+# Z-scores are computed for every subject either way, every subject who clears
+# the inclusion rules receives an index, and the index is built identically for
+# both halves. The discovery/replication labelling that downstream association
+# analyses consume is written by extras/make_split.R and is the same assignment;
+# this stage recomputes it from the config rather than reading that file, so the
+# two cannot fall out of step.
+#
+# THE DEFAULT IS TO FIT ON EVERYONE (split.fit_on: all), and that is a
+# considered choice rather than an omission. The normative model contains no
+# outcome — only age, sex, scanner and optionally ICV — so fitting it on the
+# whole cohort is not leakage with respect to any later association test; it is
+# simply the more precise estimate of the norms. Setting fit_on: discovery is a
+# sensitivity arm that asks whether the deviations depend on who the norms were
+# built from, and it CHANGES EVERY INDEX VALUE, so it needs its own run.
+#
+# Precedence: TRAIN_IDS (an externally supplied list) overrides the config.
+# ---------------------------------------------------------------------------
+source_local("split_assign.R")
+split_cfg <- read_split_cfg(cfg)
 
-if (nzchar(train_ids_file) && file.exists(train_ids_file)) {
-  train_ids <- fread(train_ids_file, select = "id")$id
+train_ids_file <- Sys.getenv("TRAIN_IDS", "")
+train_mask     <- rep(TRUE, nrow(dt))
+split_source   <- "none (normative models fitted on all subjects)"
+split_checksum_disc <- NA_character_
+
+if (nzchar(train_ids_file)) {
+  # An unset variable means "no split". A SET variable pointing at a file that
+  # is not there means a split was intended and did not happen, which must not
+  # pass silently as fitting on everyone.
+  if (!file.exists(train_ids_file))
+    stop("TRAIN_IDS is set but the file does not exist: ", train_ids_file,
+         "\n  Refusing to fall back to fitting on all subjects: that would ",
+         "silently produce a different analysis from the one requested.",
+         call. = FALSE)
+  train_ids  <- fread(train_ids_file, select = "id")$id
   train_mask <- dt$id %in% as.character(train_ids)
-  cat(sprintf("[split] Fitting normative models on %d/%d subjects (discovery)\n",
-              sum(train_mask), nrow(dt)))
+  if (!any(train_mask))
+    stop("TRAIN_IDS matched no subject in features_file. Check that the id ",
+         "columns are the same identifier.", call. = FALSE)
+  # Under an id-membership rule, any subject added to the cohort since the file
+  # was written falls to the held-out side without appearing anywhere. Say so.
+  n_unlisted <- sum(!dt$id %in% as.character(train_ids))
+  split_source <- sprintf("TRAIN_IDS file: %s", train_ids_file)
+  split_checksum_disc <- split_checksum(dt$id[train_mask])
+  cat(sprintf("[split] Fitting normative models on %d/%d subjects (%.4f) from TRAIN_IDS\n",
+              sum(train_mask), nrow(dt), mean(train_mask)))
+  cat(sprintf("[split] %d subject(s) in this cohort are absent from the file and are held out.\n",
+              n_unlisted))
+  if (abs(mean(train_mask) - 0.6) > 0.15)
+    message("[split] NOTE: the realised discovery fraction is ",
+            sprintf("%.3f", mean(train_mask)),
+            ". If the file predates the current cohort, every subject added ",
+            "since is on the held-out side and this fraction has drifted. ",
+            "split.mode: hash removes that failure mode.")
+
+} else if (identical(split_cfg$fit_on, "discovery")) {
+  asg <- assign_split(dt$id, label = split_cfg$label,
+                      discovery_frac = split_cfg$discovery_frac)
+  train_mask <- asg$split == "discovery"
+  split_source <- sprintf("config split: mode=%s label=\"%s\" frac=%.4f",
+                          split_cfg$mode, split_cfg$label, split_cfg$discovery_frac)
+  split_checksum_disc <- split_checksum(dt$id[train_mask])
+  cat(sprintf("[split] Fitting normative models on %d/%d subjects (%.4f, requested %.4f)\n",
+              sum(train_mask), nrow(dt), mean(train_mask), split_cfg$discovery_frac))
+  cat(sprintf("[split] label = \"%s\" | discovery checksum = %s\n",
+              split_cfg$label, split_checksum_disc))
+
+} else {
+  if (identical(split_cfg$mode, "hash")) {
+    asg <- assign_split(dt$id, label = split_cfg$label,
+                        discovery_frac = split_cfg$discovery_frac)
+    split_checksum_disc <- split_checksum(dt$id[asg$split == "discovery"])
+    cat(sprintf("[split] A split is defined (label \"%s\", frac %.4f, discovery checksum %s) but split.fit_on is \"all\",\n",
+                split_cfg$label, split_cfg$discovery_frac, split_checksum_disc))
+    cat("[split] so the normative models are fitted on every subject. The labels are for downstream use.\n")
+  } else {
+    cat("[split] No split configured; normative models fitted on all subjects.\n")
+  }
+}
+
+if (any(!train_mask)) {
 
   # A scanner with no discovery subjects still receives predictions, because
   # subsetting a factor keeps its levels: mgcv sees the level, fits its random
@@ -200,7 +285,12 @@ if ("icv_raw" %in% names(dt) && any(is.finite(dt$icv_raw))) {
     data = dt[train_mask, ], method = "REML", na.action = na.exclude
   )
   icv_pred <- predict(icv_fit, newdata = dt, type = "response")
-  dt$icv <- as.numeric(scale(dt$icv_raw - icv_pred, center = TRUE, scale = FALSE))
+  # Centre on the DISCOVERY subjects, matching the sample the model was fitted
+  # on. Centring over everyone lets held-out subjects shift the covariate the
+  # normative models are adjusted for.
+  icv_resid  <- dt$icv_raw - icv_pred
+  icv_centre <- mean(icv_resid[train_mask], na.rm = TRUE)
+  dt$icv <- as.numeric(icv_resid - icv_centre)
 }
 
 # Decide which modalities need ICV (default: SA + SubVol; CT typically does not).
@@ -272,8 +362,13 @@ write_tsv(sizes_df, out_sizes)
 # -----------------------------
 # Winsorize feature values for modeling
 # -----------------------------
+# Clipping quantiles are read off the DISCOVERY subjects when a split is active,
+# so held-out subjects cannot influence the values the models are fitted to.
+# With no split, train_mask is all TRUE and this is identical to the unsplit
+# behaviour.
 dt_raw <- dt
-dt[feature_cols] <- lapply(dt[feature_cols], winsorize, lower = 0.001, upper = 0.999)
+dt[feature_cols] <- lapply(dt[feature_cols], function(x)
+  winsorize(x, lower = 0.001, upper = 0.999, ref = x[train_mask]))
 
 # -----------------------------
 # Fit normative models
@@ -326,7 +421,9 @@ res_list <- future_lapply(
       needs_icv      = function(...) p$with_icv,
       train_mask     = train_mask,
       variance_model = variance_model,
-      k_age_scale    = k_age_scale
+      k_age_scale    = k_age_scale,
+      edf_max_frac   = edf_max_frac,
+      min_r2         = min_r2
     )
   },
   future.seed = TRUE
@@ -353,6 +450,42 @@ qc_df <- do.call(rbind, lapply(res_list, function(r) {
     stringsAsFactors = FALSE
   )
 }))
+
+# ---------------------------------------------------------------------------
+# OUT-OF-SAMPLE CALIBRATION of the normative model.
+#
+# Only meaningful when the norms were fitted on a subset: it asks whether the
+# reference model is calibrated on subjects it never saw, which is the question
+# a held-out set answers in normative modelling and the reason the field uses
+# one. A well-behaved model gives mean(z) ~ 0 and sd(z) ~ 1 in BOTH columns; a
+# held-out sd meaningfully above 1 means the norms do not transfer, and the
+# gap between the two columns is the optimism of the in-sample fit.
+#
+# This is the reportable result that fitting on the discovery half buys. With
+# norms fitted on everyone there is no held-out set and the columns are omitted
+# rather than filled with a copy of the in-sample figures.
+if (any(!train_mask)) {
+  cal <- do.call(rbind, lapply(res_list, function(r) {
+    if (!is.list(r) || !isTRUE(r$ok)) return(NULL)
+    zi <- r$z[train_mask]; zo <- r$z[!train_mask]
+    data.frame(
+      feature      = r$feat,
+      z_mean_fit   = mean(zi, na.rm = TRUE), z_sd_fit   = stats::sd(zi, na.rm = TRUE),
+      z_mean_heldout = mean(zo, na.rm = TRUE), z_sd_heldout = stats::sd(zo, na.rm = TRUE),
+      stringsAsFactors = FALSE
+    )
+  }))
+  qc_df <- merge(qc_df, cal, by = "feature", all.x = TRUE, sort = FALSE)
+  cat(sprintf(
+    "[normative] out-of-sample calibration over %d fitted features: held-out sd(z) median %.4f (IQR %.4f-%.4f), mean(z) median %+.4f\n",
+    nrow(cal), stats::median(cal$z_sd_heldout),
+    stats::quantile(cal$z_sd_heldout, .25), stats::quantile(cal$z_sd_heldout, .75),
+    stats::median(cal$z_mean_heldout)))
+  cat(sprintf(
+    "[normative] in-sample sd(z) median %.4f; held-out/in-sample ratio %.4f (1.00 = the norms transfer)\n",
+    stats::median(cal$z_sd_fit),
+    stats::median(cal$z_sd_heldout) / stats::median(cal$z_sd_fit)))
+}
 
 write_tsv(qc_df, out_qc)
 
@@ -425,8 +558,21 @@ cat("Wrote: ", out_long, "\n")
 
 write_run_info(out_stage, "02_run_normdevs", opt$config, params = list(
   k_age = k_age, k_age_scale = k_age_scale, variance_model = variance_model,
+  edf_max_frac = edf_max_frac,
+  min_r2 = if (is.null(min_r2)) "off" else as.numeric(min_r2),
   use_site_RE = use_site_RE, sex_interact = sex_interact,
   icv_modalities = icv_modalities,
   n_features_in = length(feature_cols), n_features_fitted = length(ok_res),
-  n_subjects = length(ids), train_ids = if (nzchar(train_ids_file)) train_ids_file else "none"
+  n_subjects = length(ids),
+  # Enough to reconstruct exactly which subjects the norms were fitted on,
+  # without holding on to the id list. A run whose split silently did not happen
+  # is then visible here rather than only in a log line that scrolled past.
+  split_source        = split_source,
+  split_mode          = split_cfg$mode,
+  split_label          = if (identical(split_cfg$mode, "hash")) split_cfg$label else "none",
+  split_fit_on        = split_cfg$fit_on,
+  split_discovery_frac_requested = if (identical(split_cfg$mode, "hash")) split_cfg$discovery_frac else NA,
+  n_fitted_on         = sum(train_mask),
+  frac_fitted_on      = round(mean(train_mask), 6),
+  discovery_checksum  = split_checksum_disc
 ))

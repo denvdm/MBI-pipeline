@@ -80,7 +80,7 @@ echo
   --mni       "$MNI_FILE" \
   --gm        "$GM_FILE"  \
   --lut       "$LUT_FILE" \
-  --fsavg     "$FSAVG_DIR" \
+  --fsavg-dir "$FSAVG_DIR" \
   --atlas-out "$ATLAS_OUT" \
   --gm-out    "$GM_OUT"   \
   --lut-out   "$LUT_OUT"
