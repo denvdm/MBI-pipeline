@@ -270,9 +270,10 @@ free parameters at all** — `ratio` is algebraically inert, `clamp_z` is a safe
 rail, `beta` is 0 — so there is nothing in the construction that could have been
 tuned to produce a result. Values above 1 buy a hypothesis (that demand relates
 non-linearly to vulnerability, with both extremes disproportionately affected)
-at a real cost in concentration: on the reference cohort `N_eff` fell from 43.8
-at emphasis 1 to 20.6 at 2 and 12.4 at 3, while the largest single feature share
-rose from 5.3% to 11.8% to 19.4%. Raise it only with a stated reason, and record
+at a real cost in concentration: on a reference cohort `N_eff` more than halved
+between emphasis 1 and 2 and fell by roughly three quarters by 3, while the
+largest single feature share doubled and then quadrupled. Measure it on your own
+build with `extras/sweep_emphasis.R`. Raise it only with a stated reason, and record
 that reason in `extras/SELECTION_RULE.md`.
 
 **`ratio`** sets the weight scale and cancels out of MBI. Setting it to the map's

@@ -177,8 +177,8 @@ if (!is.null(icc_file) && !is.null(icc_min)) {
 #
 # CHOOSE THE BOUND OUTSIDE THE BIOLOGICAL RANGE, not at its edge. Severe atrophy
 # legitimately reaches |z| of 5 to 8 in a few regions, and those are the
-# subjects the index exists to detect. On the reference cohort the 99.9th
-# percentile of |z| is 4.17 and the 99.99th is 8.20, so a bound of 10 removes
+# subjects the index exists to detect. On one reference cohort the 99.9th
+# percentile of |z| sat near 4 and the 99.99th near 8, so a bound of 10 removes
 # only the far tail. There is no universal value: read your own |z| distribution
 # before setting one.
 z_implausible <- cfg$mbi$z_implausible %||% NULL

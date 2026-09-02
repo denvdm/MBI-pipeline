@@ -188,10 +188,10 @@ mbi:
                           # emphasis on the tails, encoding a hypothesis that
                           # demand relates non-linearly to vulnerability. It
                           # buys that hypothesis at a real cost in concentration
-                          # -- on the reference cohort, N_eff fell from 43.8 at
-                          # emphasis 1 to 20.6 at 2 and 12.4 at 3, while the
-                          # largest single feature share rose from 5.3% to 11.8%
-                          # to 19.4%. Raise it only with a stated reason.
+                          # -- on a reference cohort N_eff more than halved
+                          # between emphasis 1 and 2 and by roughly three quarters
+                          # by 3, while the largest single feature share doubled
+                          # and then quadrupled. Raise it only with a stated reason.
                           # SENSITIVITY TO REPORT: emphasis in {1, 2, 3}.
 
   clamp_z: 3              # clamp the robust-z of the map at +/- this many robust
@@ -266,7 +266,7 @@ mbi:
                           # rather than from a percentile. Real pathology lowers
                           # thickness, area and volume, so genuine extreme
                           # deviations are NEGATIVE; an artefact tail is usually
-                          # one-sided the other way. On the reference cohort the
+                          # one-sided the other way. On one such cohort the
                           # fraction of the tail that is negative falls from 0.42
                           # above |z| = 5 to 0.02 above 10 and 0.00 above 15, so
                           # a bound of 10 cuts a population that is ~96%

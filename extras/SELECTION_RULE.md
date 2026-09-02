@@ -16,6 +16,12 @@ than withheld. A reader should judge that decision knowing both things.
 moves without a dated entry here is indistinguishable, to a reader, from one
 that was tuned against a result.
 
+**On the figures quoted below.** Where a decision rests on a measurement, the
+direction and the rough magnitude are given rather than the exact values of any
+one cohort: the grounds are properties of the construction, not of a dataset.
+Figures for a particular build come from that build's own stage outputs
+(`run_info.txt`, `mbi_influence_shares.txt`, `extras/sweep_emphasis.R`).
+
 ---
 
 ## Rule as pre-specified
@@ -256,15 +262,13 @@ so every downstream result must be recomputed before it is quoted again.
    been chosen to produce a result. `emphasis = 2` leaves exactly one free
    parameter, and it is the one that concentrates influence.
 
-2. *Concentration.* Influence is markedly more evenly spread. Measured on the
-   reference cohort at `beta = 0`, over 143 features:
-
-   | emphasis | N_eff | largest feature share | low/high tail balance | cor with the map-gradient target |
-   |---|---|---|---|---|
-   | **1** | **43.8** | **5.3%** | **2.16** | **0.926** |
-   | 1.5 | 28.3 | 8.4% | 2.90 | 0.885 |
-   | 2 | 20.6 | 11.8% | 3.97 | 0.843 |
-   | 3 | 12.4 | 19.4% | 7.45 | 0.776 |
+2. *Concentration.* Influence is markedly more evenly spread. Measured on a
+   reference cohort at `beta = 0`, the effective number of contributing features
+   more than halves between `emphasis` 1 and 2 and falls by roughly three
+   quarters between 1 and 3, while the largest single-feature share doubles and
+   then quadruples and the low/high tail balance rises monotonically.
+   `extras/sweep_emphasis.R` reports these for any build; the ordering is a
+   property of the transform rather than of a cohort.
 
    The whole point of this construction is that no small set of regions should
    be able to drive the result. `emphasis = 2` more than halves the effective
@@ -273,19 +277,19 @@ so every downstream result must be recomputed before it is quoted again.
 
 3. *Tail balance.* At `emphasis = 2` the low-CMRglc tail carries roughly four
    times the influence of the high tail, which makes "metabolic gradient" a
-   strained description of what the index measures. At `emphasis = 1` the ratio
-   is 2.16, and the description is accurate.
+   strained description of what the index measures. At `emphasis = 1` it is
+   closer to two, and the description is accurate.
 
 4. *Construct validity.* Correlation with the assumption-free per-subject
-   gradient target (`r_tilt`) is 0.926 at `emphasis = 1` against 0.843 at 2.
+   gradient target (`r_tilt`) is markedly higher at `emphasis = 1` than at 2.
    Decision 1 struck this quantity as a *selection* criterion, correctly, because
    it structurally favours the linear form. It remains admissible as evidence
    about which form better measures the stated construct.
 
 **Invariance checks reported, not used to select.** The two settings produce
 near-identical indices: subject-level cor(MBI at emphasis 1, MBI at emphasis 2)
-= 0.9688 over 94,818 subjects. For scale, MBI's own split-half reliability is
-0.805, so the two settings agree with one another more closely than either
+is about 0.97. For scale, that exceeds MBI's own split-half reliability, so the
+two settings agree with one another more closely than either
 agrees with an independent half of the same brain — though both are built from
 the same deviations and therefore share their noise, which inflates that
 comparison. An outcome panel run under both settings differed negligibly. These
@@ -461,8 +465,9 @@ one parcel is visible rather than inferred. No clamp is applied: the diagnostic
 comes first, and any bound would be a further dated decision.
 
 **Effect on the index.** The gate change can alter which features enter, and
-therefore every score. On the reference cohort the low-r2 arm never fired — all
-160 features fitted, maximum edf_age 6.40 against a cap of 8 — so removing it
+therefore every score. On the reference cohort the low-r2 arm never fired —
+every feature was fitted, with the largest age-smooth edf well inside the cap —
+so removing it
 leaves that run unchanged; it is recorded here because it will not necessarily
 be dormant under the discovery-only fit. The concentration file is a report and
 changes nothing.
@@ -480,20 +485,21 @@ cohort contains `|z|` above 10.
 
 **Grounds.** Nothing bounded a deviation. Stage 02 computes z from the raw rather
 than the winsorised value, deliberately — a genuinely deviant subject should keep
-a large deviation — and `clamp_z` bounds the map, not z. On the reference cohort
-the `|z|` distribution is 2.76 at the 99th percentile, 4.17 at the 99.9th, 8.20
-at the 99.99th, and 55.86 at the maximum. No morphometric quantity is 56 standard
-deviations from its normative expectation; that is a segmentation failure. And
-because MBI is a weighted sum over ~143 features with no single one dominating by
-design, one absurd value dominates by accident: on a 143-feature synthetic build
-at N_eff 52, a single feature at `|z|` = 56 moved that subject's index by 15 SD.
+a large deviation — and `clamp_z` bounds the map, not z. On a reference cohort
+the `|z|` distribution sits below 3 at the 99th percentile and runs past 50 at
+the maximum. No morphometric quantity is fifty standard deviations from its
+normative expectation; that is a segmentation failure. And because MBI is a
+weighted sum over of order a hundred features with no single one dominating by
+design, one absurd value dominates by accident: on a synthetic build of that
+size at N_eff 52, a single feature at `|z|` = 56 moved that subject's index by
+15 SD.
 
 **Missing rather than clipped.** Clipping asserts a value the data does not
 support — that the region really is z_implausible SD deviant — and the index then
 propagates that assertion. On the same build, clipping at 5 still left the
 artefact moving the subject by 1.7 SD and clipping at 10 by 3.0 SD, where setting
 the observation to NA moved them by 0.36 SD, which is the renormalisation from
-dropping one feature of 143. Ignorance is the true state of a failed
+dropping one feature of the set. Ignorance is the true state of a failed
 segmentation, and the existing inclusion rules already handle it.
 
 **Bound used: `mbi.z_implausible = 10`.** Fixed on the sign structure of the
@@ -502,31 +508,33 @@ cohort's own tail, before any outcome was consulted.
 For CT, SA and SubVol the orientation is +1, so real pathology — atrophy, tissue
 loss — produces NEGATIVE deviations. The observed tail points the other way:
 
-| bound | observations | fraction negative |
-|---|---|---|
-| 5 | 6,795 | 0.416 |
-| 6 | 3,522 | 0.328 |
-| 8 | 1,585 | 0.115 |
-| 10 | 1,020 | 0.019 |
-| 15 | 435 | 0.000 |
+| bound | fraction of the tail that is negative |
+|---|---|
+| 5 | 0.42 |
+| 6 | 0.33 |
+| 8 | 0.12 |
+| 10 | 0.02 |
+| 15 | 0.00 |
 
 A tail that is 98% one-sided above 10 and entirely one-sided above 15 is a
 mechanism, not a distribution. Treating the real component as symmetric — the
 assumption most favourable to a LOW bound, since real deviations are more likely
 atrophy-dominant and therefore negative — the real part is about twice the
-negative count, which gives the proportion of each cut that is artefact: 34% at a
-bound of 6, 77% at 8, 96% at 10. A bound of 6 would discard roughly 1,155
-negative observations, plausibly real severe atrophy in about a thousand
-subjects, which is a directional bias against exactly the subjects the index
-exists to detect. A bound of 10 removes 1,020 of 14,981,138 deviations (0.007%)
-and costs two subjects a modality under `coverage_thr`.
+negative count, which gives the proportion of each cut that is artefact: about a
+third at a bound of 6, three quarters at 8, and almost all of it at 10. A bound
+of 6 would discard on the order of a thousand negative observations, plausibly
+real severe atrophy in as many subjects, which is a directional bias against
+exactly the subjects the index exists to detect. A bound of 10 removes well
+under 0.01% of all deviations and costs a handful of subjects a modality under
+`coverage_thr`.
 
 **What the artefact is.** Not failed reconstructions. Above a bound of 10, no
 (subject, region) pair is affected in both CT and SA, the median affected subject
 has ONE affected feature, and every one of the eight worst features by rate is
 surface area in a small medial parcel — posterior and isthmus cingulate,
-parahippocampal, caudal anterior cingulate, paracentral — bilaterally in 251
-cases. That is a parcel-boundary problem in cortical surface area near the medial
+parahippocampal, caudal anterior cingulate, paracentral — with the affected
+parcels pairing bilaterally. That is a parcel-boundary problem in cortical
+surface area near the medial
 wall, not a subject-level QC failure. It is recorded rather than acted on beyond
 the bound: excluding those parcels by identity is what Decision 5 rules out, and
 within-parcel dispersion and the ICC gate remain the outcome-blind instruments if
