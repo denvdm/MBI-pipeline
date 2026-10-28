@@ -139,6 +139,9 @@ normalise_aseg_names <- function(nm) {
   nm <- gsub("^Third_",  "3rd_", nm)
   nm <- gsub("^Fourth_", "4th_", nm)
   nm <- gsub("^Fifth_",  "5th_", nm)
+  # FreeSurfer 7 writes "Thalamus" where FreeSurfer 6 and the PET atlas LUT
+  # write "Thalamus_Proper"; map to the canonical name.
+  nm <- sub("_Thalamus$", "_Thalamus_Proper", nm)
   nm
 }
 names(aseg) <- normalise_aseg_names(names(aseg))
@@ -156,6 +159,13 @@ asegHemi <- c(
 )
 
 keep_aseg <- c("MRID", asegNonhemi, paste0("lh_", asegHemi), paste0("rh_", asegHemi))
+missing_aseg <- setdiff(keep_aseg, c(names(aseg), "EstimatedTotalIntraCranialVol"))
+if (length(missing_aseg)) {
+  stop("aseg structures not found in ", f_aseg, " after name normalisation: ",
+       paste(missing_aseg, collapse = ", "),
+       "\n  columns present: ", paste(head(setdiff(names(aseg), "MRID"), 40), collapse = ", "),
+       call. = FALSE)
+}
 keep_aseg <- keep_aseg[keep_aseg %in% names(aseg)]
 aseg <- aseg[, keep_aseg, drop = FALSE]
 
